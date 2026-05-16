@@ -3,8 +3,18 @@ name: Desktop Release
 # This workflow runs in the PUBLIC release repo so GitHub Actions standard
 # runners (including macOS) are free. It checks out the PRIVATE desktop source
 # repo via SOURCE_REPO_TOKEN; source code stays private.
+#
+# Two ways to trigger:
+#   1. Push a tag `vX.Y.Z` to THIS repo  -> signed release, builds private main
+#      HEAD, version taken from the tag name. This is the normal release path.
+#   2. workflow_dispatch                 -> manual fallback; bumps the version
+#      in the private source repo and tags it, can build any branch, supports
+#      unsigned_test builds.
 
 on:
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
       source_ref:
@@ -59,7 +69,7 @@ concurrency:
 
 jobs:
   prepare:
-    name: Bump version and tag source
+    name: Resolve version
     runs-on: ubuntu-latest
     env:
       APPLE_SIGN_IDENTITY: ${{ secrets.APPLE_SIGN_IDENTITY }}
@@ -71,29 +81,29 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
-      prerelease: ${{ inputs.prerelease }}
-      draft: ${{ inputs.draft }}
+      build_ref: ${{ steps.version.outputs.build_ref }}
+      mac_signing: ${{ steps.mode.outputs.mac_signing }}
+      prerelease: ${{ steps.mode.outputs.prerelease }}
+      draft: ${{ steps.mode.outputs.draft }}
     steps:
-      - name: Checkout source
-        uses: actions/checkout@v4
-        with:
-          repository: aka-danielZhang/openturtle
-          ref: ${{ inputs.source_ref }}
-          token: ${{ secrets.SOURCE_REPO_TOKEN }}
-          fetch-depth: 0
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-
-      - name: Configure git
+      - name: Resolve release mode
+        id: mode
+        shell: bash
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "push" ]; then
+            # Tag-triggered releases are always signed and final.
+            echo "mac_signing=developer_id" >> "${GITHUB_OUTPUT}"
+            echo "prerelease=false" >> "${GITHUB_OUTPUT}"
+            echo "draft=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "mac_signing=${{ inputs.mac_signing }}" >> "${GITHUB_OUTPUT}"
+            echo "prerelease=${{ inputs.prerelease }}" >> "${GITHUB_OUTPUT}"
+            echo "draft=${{ inputs.draft }}" >> "${GITHUB_OUTPUT}"
+          fi
 
       - name: Require macOS signing secrets
-        if: inputs.mac_signing == 'developer_id'
+        if: steps.mode.outputs.mac_signing == 'developer_id'
         shell: bash
         run: |
           set -euo pipefail
@@ -123,38 +133,70 @@ jobs:
             exit 1
           fi
 
-      - name: Bump desktop package version
+      - name: Checkout source
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@v4
+        with:
+          repository: aka-danielZhang/openturtle
+          ref: ${{ inputs.source_ref }}
+          token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Configure git
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Resolve version and tag
         id: version
         shell: bash
         run: |
           set -euo pipefail
-          cd apps/desktop
 
-          if [ -n "${{ inputs.exact_version }}" ]; then
-            raw_version="$(npm version "${{ inputs.exact_version }}" --no-git-tag-version)"
-          elif [ "${{ inputs.bump }}" = "prerelease" ]; then
-            raw_version="$(npm version prerelease --preid "${{ inputs.preid }}" --no-git-tag-version)"
+          if [ "${{ github.event_name }}" = "push" ]; then
+            # Version comes from the tag pushed to this repo.
+            tag="${{ github.ref_name }}"
+            version="${tag#v}"
+            build_ref="main"
           else
-            raw_version="$(npm version "${{ inputs.bump }}" --no-git-tag-version)"
+            # Manual dispatch: bump the version in the private source repo,
+            # commit and tag it, then build that tag.
+            cd apps/desktop
+            if [ -n "${{ inputs.exact_version }}" ]; then
+              raw_version="$(npm version "${{ inputs.exact_version }}" --no-git-tag-version)"
+            elif [ "${{ inputs.bump }}" = "prerelease" ]; then
+              raw_version="$(npm version prerelease --preid "${{ inputs.preid }}" --no-git-tag-version)"
+            else
+              raw_version="$(npm version "${{ inputs.bump }}" --no-git-tag-version)"
+            fi
+
+            version="${raw_version#v}"
+            tag="v${version}"
+            cd ../..
+
+            if git rev-parse "${tag}" >/dev/null 2>&1; then
+              echo "Tag ${tag} already exists in source repository" >&2
+              exit 1
+            fi
+
+            git add apps/desktop/package.json
+            git commit -m "chore(desktop): release ${tag}"
+            git tag "${tag}"
+            git push origin "HEAD:${{ inputs.source_ref }}"
+            git push origin "${tag}"
+            build_ref="${tag}"
           fi
-
-          version="${raw_version#v}"
-          tag="v${version}"
-          cd ../..
-
-          if git rev-parse "${tag}" >/dev/null 2>&1; then
-            echo "Tag ${tag} already exists in source repository" >&2
-            exit 1
-          fi
-
-          git add apps/desktop/package.json
-          git commit -m "chore(desktop): release ${tag}"
-          git tag "${tag}"
-          git push origin "HEAD:${{ inputs.source_ref }}"
-          git push origin "${tag}"
 
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "build_ref=${build_ref}" >> "${GITHUB_OUTPUT}"
 
   build:
     name: Build ${{ matrix.label }}
@@ -182,11 +224,11 @@ jobs:
       WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
       WINDOWS_SIGN_WITH_PARAMS: ${{ secrets.WINDOWS_SIGN_WITH_PARAMS }}
     steps:
-      - name: Checkout source tag
+      - name: Checkout source
         uses: actions/checkout@v4
         with:
           repository: aka-danielZhang/openturtle
-          ref: ${{ needs.prepare.outputs.tag }}
+          ref: ${{ needs.prepare.outputs.build_ref }}
           token: ${{ secrets.SOURCE_REPO_TOKEN }}
           fetch-depth: 0
 
@@ -194,6 +236,14 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 24
+
+      - name: Set package version from release tag
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd apps/desktop
+          npm version "${{ needs.prepare.outputs.version }}" --no-git-tag-version --allow-same-version
 
       - name: Setup pnpm
         run: |
@@ -237,7 +287,7 @@ jobs:
           }
 
       - name: Require macOS signing secrets
-        if: runner.os == 'macOS' && inputs.mac_signing == 'developer_id'
+        if: runner.os == 'macOS' && needs.prepare.outputs.mac_signing == 'developer_id'
         shell: bash
         run: |
           set -euo pipefail
@@ -268,7 +318,7 @@ jobs:
           fi
 
       - name: Import macOS signing certificate
-        if: runner.os == 'macOS' && inputs.mac_signing == 'developer_id'
+        if: runner.os == 'macOS' && needs.prepare.outputs.mac_signing == 'developer_id'
         shell: bash
         run: |
           certificate_path="${RUNNER_TEMP}/macos-signing.p12"
@@ -290,7 +340,7 @@ jobs:
           echo "APPLE_APP_SPECIFIC_PASSWORD=${APPLE_ID_PASSWORD}" >> "${GITHUB_ENV}"
 
       - name: Validate macOS signing identity
-        if: runner.os == 'macOS' && inputs.mac_signing == 'developer_id'
+        if: runner.os == 'macOS' && needs.prepare.outputs.mac_signing == 'developer_id'
         shell: bash
         run: |
           set -euo pipefail
@@ -350,7 +400,7 @@ jobs:
         run: pnpm --filter @openturtle/desktop make:mac
 
       - name: Verify macOS signature and notarization
-        if: runner.os == 'macOS' && inputs.mac_signing == 'developer_id'
+        if: runner.os == 'macOS' && needs.prepare.outputs.mac_signing == 'developer_id'
         shell: bash
         run: |
           set -euo pipefail
@@ -382,7 +432,7 @@ jobs:
           test -f "apps/desktop/out/builder/OpenTurtle.OS-darwin-${{ matrix.arch }}-${{ needs.prepare.outputs.version }}.zip.blockmap"
 
       - name: Verify unsigned macOS test package
-        if: runner.os == 'macOS' && inputs.mac_signing == 'unsigned_test'
+        if: runner.os == 'macOS' && needs.prepare.outputs.mac_signing == 'unsigned_test'
         shell: bash
         run: |
           set -euo pipefail
@@ -445,7 +495,7 @@ jobs:
       RELEASE_REPOSITORY: GuoxinShan/openturtle-desktop-releases
       RELEASE_DRAFT: ${{ needs.prepare.outputs.draft }}
       RELEASE_PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
-      MAC_SIGNING_MODE: ${{ inputs.mac_signing }}
+      MAC_SIGNING_MODE: ${{ needs.prepare.outputs.mac_signing }}
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
