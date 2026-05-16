@@ -1,0 +1,547 @@
+name: Desktop Release
+
+# This workflow runs in the PUBLIC release repo so GitHub Actions standard
+# runners (including macOS) are free. It checks out the PRIVATE desktop source
+# repo via SOURCE_REPO_TOKEN; source code stays private.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Branch of the private source repo to build from
+        required: true
+        default: main
+        type: string
+      bump:
+        description: Version bump to apply when exact_version is empty
+        required: true
+        default: patch
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+          - prerelease
+      exact_version:
+        description: Exact semver version, for example 0.2.0
+        required: false
+        type: string
+      preid:
+        description: Prerelease identifier used with bump=prerelease
+        required: false
+        default: beta
+        type: string
+      prerelease:
+        description: Mark the public release as prerelease
+        required: true
+        default: false
+        type: boolean
+      draft:
+        description: Create the public release as draft
+        required: true
+        default: false
+        type: boolean
+      mac_signing:
+        description: macOS signing mode
+        required: true
+        default: developer_id
+        type: choice
+        options:
+          - developer_id
+          - unsigned_test
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-release
+  cancel-in-progress: false
+
+env:
+  SOURCE_REPOSITORY: aka-danielZhang/openturtle
+  RELEASE_REPOSITORY: GuoxinShan/openturtle-desktop-releases
+
+jobs:
+  prepare:
+    name: Bump version and tag source
+    runs-on: ubuntu-latest
+    env:
+      APPLE_SIGN_IDENTITY: ${{ secrets.APPLE_SIGN_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      prerelease: ${{ inputs.prerelease }}
+      draft: ${{ inputs.draft }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ inputs.source_ref }}
+          token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Require macOS signing secrets
+        if: inputs.mac_signing == 'developer_id'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          missing=()
+          for name in \
+            APPLE_SIGN_IDENTITY \
+            APPLE_CERTIFICATE_BASE64 \
+            APPLE_CERTIFICATE_PASSWORD \
+            APPLE_ID \
+            APPLE_ID_PASSWORD \
+            APPLE_TEAM_ID
+          do
+            if [ -z "${!name:-}" ]; then
+              missing+=("${name}")
+            fi
+          done
+
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "Missing required macOS signing secret(s): ${missing[*]}" >&2
+            echo "Configure Apple Developer ID signing and notarization secrets before publishing desktop releases." >&2
+            exit 1
+          fi
+
+          if [ "${APPLE_SIGN_IDENTITY}" = "-" ]; then
+            echo "APPLE_SIGN_IDENTITY must be a Developer ID signing identity, not '-'." >&2
+            exit 1
+          fi
+
+      - name: Bump desktop package version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd apps/desktop
+
+          if [ -n "${{ inputs.exact_version }}" ]; then
+            raw_version="$(npm version "${{ inputs.exact_version }}" --no-git-tag-version)"
+          elif [ "${{ inputs.bump }}" = "prerelease" ]; then
+            raw_version="$(npm version prerelease --preid "${{ inputs.preid }}" --no-git-tag-version)"
+          else
+            raw_version="$(npm version "${{ inputs.bump }}" --no-git-tag-version)"
+          fi
+
+          version="${raw_version#v}"
+          tag="v${version}"
+          cd ../..
+
+          if git rev-parse "${tag}" >/dev/null 2>&1; then
+            echo "Tag ${tag} already exists in source repository" >&2
+            exit 1
+          fi
+
+          git add apps/desktop/package.json
+          git commit -m "chore(desktop): release ${tag}"
+          git tag "${tag}"
+          git push origin "HEAD:${{ inputs.source_ref }}"
+          git push origin "${tag}"
+
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+
+  build:
+    name: Build ${{ matrix.label }}
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: windows-x64
+            os: windows-latest
+            forge_platform: win32
+            arch: x64
+          - label: macos-universal
+            os: macos-15
+            forge_platform: darwin
+            arch: universal
+    env:
+      APPLE_SIGN_IDENTITY: ${{ secrets.APPLE_SIGN_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+      WINDOWS_SIGN_WITH_PARAMS: ${{ secrets.WINDOWS_SIGN_WITH_PARAMS }}
+    steps:
+      - name: Checkout source tag
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ needs.prepare.outputs.tag }}
+          token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Setup pnpm
+        run: |
+          npm install -g pnpm@9.15.0
+          pnpm --version
+
+      - name: Configure pnpm store
+        shell: bash
+        run: pnpm config set store-dir .pnpm-store
+
+      - name: Restore pnpm store cache
+        uses: actions/cache@v4
+        with:
+          path: .pnpm-store
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Restore Electron download cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/electron
+            ~/Library/Caches/electron
+            ~/AppData/Local/electron/Cache
+          key: ${{ runner.os }}-electron-${{ matrix.arch }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-electron-${{ matrix.arch }}-
+            ${{ runner.os }}-electron-
+
+      - name: Restore Windows certificate
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+        run: |
+          if (-not [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_BASE64)) {
+            $certPath = Join-Path $env:RUNNER_TEMP "windows-signing.pfx"
+            [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64))
+            "WINDOWS_CERTIFICATE_FILE=$certPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          }
+
+      - name: Require macOS signing secrets
+        if: runner.os == 'macOS' && inputs.mac_signing == 'developer_id'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          missing=()
+          for name in \
+            APPLE_SIGN_IDENTITY \
+            APPLE_CERTIFICATE_BASE64 \
+            APPLE_CERTIFICATE_PASSWORD \
+            APPLE_ID \
+            APPLE_ID_PASSWORD \
+            APPLE_TEAM_ID
+          do
+            if [ -z "${!name:-}" ]; then
+              missing+=("${name}")
+            fi
+          done
+
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "Missing required macOS signing secret(s): ${missing[*]}" >&2
+            echo "Configure Apple Developer ID signing and notarization secrets before publishing macOS desktop releases." >&2
+            exit 1
+          fi
+
+          if [ "${APPLE_SIGN_IDENTITY}" = "-" ]; then
+            echo "APPLE_SIGN_IDENTITY must be a Developer ID signing identity, not '-'." >&2
+            exit 1
+          fi
+
+      - name: Import macOS signing certificate
+        if: runner.os == 'macOS' && inputs.mac_signing == 'developer_id'
+        shell: bash
+        run: |
+          certificate_path="${RUNNER_TEMP}/macos-signing.p12"
+          keychain_path="${RUNNER_TEMP}/app-signing.keychain-db"
+          keychain_password="$(uuidgen)"
+
+          echo -n "${APPLE_CERTIFICATE_BASE64}" | base64 --decode -o "${certificate_path}"
+          security create-keychain -p "${keychain_password}" "${keychain_path}"
+          security set-keychain-settings -lut 21600 "${keychain_path}"
+          security unlock-keychain -p "${keychain_password}" "${keychain_path}"
+          security import "${certificate_path}" -P "${APPLE_CERTIFICATE_PASSWORD}" -A -t cert -f pkcs12 -k "${keychain_path}"
+          security list-keychains -d user -s "${keychain_path}"
+          security default-keychain -s "${keychain_path}"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "${keychain_password}" "${keychain_path}"
+          builder_identity="${APPLE_SIGN_IDENTITY#Developer ID Application: }"
+          echo "MACOS_SIGNING_KEYCHAIN=${keychain_path}" >> "${GITHUB_ENV}"
+          echo "CSC_KEYCHAIN=${keychain_path}" >> "${GITHUB_ENV}"
+          echo "CSC_NAME=${builder_identity}" >> "${GITHUB_ENV}"
+          echo "APPLE_APP_SPECIFIC_PASSWORD=${APPLE_ID_PASSWORD}" >> "${GITHUB_ENV}"
+
+      - name: Validate macOS signing identity
+        if: runner.os == 'macOS' && inputs.mac_signing == 'developer_id'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          security find-identity -v -p codesigning "${MACOS_SIGNING_KEYCHAIN}" | tee "${RUNNER_TEMP}/codesigning-identities.txt"
+
+          if ! grep -F "${APPLE_SIGN_IDENTITY}" "${RUNNER_TEMP}/codesigning-identities.txt" >/dev/null; then
+            echo "APPLE_SIGN_IDENTITY was not found in the imported macOS signing certificate." >&2
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --prefer-offline
+
+      - name: Build desktop
+        run: pnpm --filter @openturtle/desktop build
+
+      - name: Package renderer resource update
+        if: matrix.label == 'macos-universal'
+        shell: bash
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_REPOSITORY: ${{ env.RELEASE_REPOSITORY }}
+        run: |
+          set -euo pipefail
+
+          update_dir="apps/desktop/out/renderer-update"
+          zip_name="OpenTurtle.OS-renderer-${VERSION}.zip"
+          manifest_path="${update_dir}/renderer-update.json"
+          versioned_manifest_path="${update_dir}/OpenTurtle.OS-renderer-${VERSION}.json"
+          mkdir -p "${update_dir}"
+          rm -f "${update_dir}/${zip_name}" "${manifest_path}" "${versioned_manifest_path}"
+
+          (cd apps/desktop/dist/renderer && zip -qry "../../out/renderer-update/${zip_name}" .)
+          sha256="$(shasum -a 256 "${update_dir}/${zip_name}" | awk '{print $1}')"
+          size="$(wc -c < "${update_dir}/${zip_name}" | tr -d ' ')"
+
+          cat > "${manifest_path}" <<EOF
+          {
+            "version": "${VERSION}",
+            "minShellVersion": "${VERSION}",
+            "url": "https://github.com/${RELEASE_REPOSITORY}/releases/download/${TAG}/${zip_name}",
+            "sha256": "${sha256}",
+            "size": ${size},
+            "createdAt": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          }
+          EOF
+          cp "${manifest_path}" "${versioned_manifest_path}"
+
+      - name: Make Windows desktop artifacts
+        if: runner.os == 'Windows'
+        run: pnpm --filter @openturtle/desktop exec electron-forge make --platform ${{ matrix.forge_platform }} --arch ${{ matrix.arch }}
+
+      - name: Make macOS desktop artifacts
+        if: runner.os == 'macOS'
+        run: pnpm --filter @openturtle/desktop make:mac
+
+      - name: Verify macOS signature and notarization
+        if: runner.os == 'macOS' && inputs.mac_signing == 'developer_id'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          app_path="apps/desktop/out/builder/mac-${{ matrix.arch }}/OpenTurtle OS.app"
+          if [ ! -d "${app_path}" ]; then
+            echo "Packaged macOS app not found: ${app_path}" >&2
+            exit 1
+          fi
+
+          codesign --verify --deep --strict --verbose=4 "${app_path}"
+          signature_info="$(codesign -dv --verbose=4 "${app_path}" 2>&1)"
+          printf '%s\n' "${signature_info}"
+
+          if printf '%s\n' "${signature_info}" | grep -q 'Signature=adhoc'; then
+            echo "macOS app was ad-hoc signed instead of Developer ID signed." >&2
+            exit 1
+          fi
+
+          if ! printf '%s\n' "${signature_info}" | grep -q "TeamIdentifier=${APPLE_TEAM_ID}"; then
+            echo "macOS app TeamIdentifier does not match APPLE_TEAM_ID." >&2
+            exit 1
+          fi
+
+          xcrun stapler validate "${app_path}"
+          spctl -a -vv -t exec "${app_path}"
+
+          test -f "apps/desktop/out/builder/latest-mac.yml"
+          test -f "apps/desktop/out/builder/OpenTurtle.OS-darwin-${{ matrix.arch }}-${{ needs.prepare.outputs.version }}.zip.blockmap"
+
+      - name: Verify unsigned macOS test package
+        if: runner.os == 'macOS' && inputs.mac_signing == 'unsigned_test'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          app_path="apps/desktop/out/builder/mac-${{ matrix.arch }}/OpenTurtle OS.app"
+          main_executable="${app_path}/Contents/MacOS/OpenTurtle OS"
+          electron_framework="${app_path}/Contents/Frameworks/Electron Framework.framework/Versions/A/Electron Framework"
+
+          for target in "${main_executable}" "${electron_framework}"; do
+            if ! codesign --verify --strict --verbose=4 "${target}"; then
+              echo "Unsigned macOS test target is not code signed: ${target}"
+              continue
+            fi
+            signature_info="$(codesign -dv --verbose=4 "${target}" 2>&1)"
+            printf '%s\n' "${signature_info}"
+
+            if printf '%s\n' "${signature_info}" | grep -q 'TeamIdentifier='; then
+              echo "Unsigned macOS test package must not use a Developer ID signature: ${target}" >&2
+              exit 1
+            fi
+
+            if printf '%s\n' "${signature_info}" | grep -q 'flags=.*runtime'; then
+              echo "Unsigned macOS test package must not use hardened runtime: ${target}" >&2
+              exit 1
+            fi
+          done
+
+      - name: Smoke test packaged app
+        if: runner.os == 'Windows' || runner.os == 'macOS'
+        run: pnpm --filter @openturtle/desktop smoke:packaged
+
+      - name: Upload desktop artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.label }}-${{ needs.prepare.outputs.tag }}
+          path: |
+            apps/desktop/out/make/**/*.dmg
+            apps/desktop/out/make/**/*.zip
+            apps/desktop/out/make/**/*.exe
+            apps/desktop/out/make/**/*.nupkg
+            apps/desktop/out/make/**/RELEASES
+            apps/desktop/out/builder/**/*.dmg
+            apps/desktop/out/builder/**/*.zip
+            apps/desktop/out/builder/**/*.yml
+            apps/desktop/out/builder/**/*.blockmap
+            apps/desktop/out/renderer-update/*.zip
+            apps/desktop/out/renderer-update/*.json
+          if-no-files-found: error
+
+  publish:
+    name: Publish public release assets
+    needs:
+      - prepare
+      - build
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+      RELEASE_REPOSITORY: ${{ env.RELEASE_REPOSITORY }}
+      RELEASE_DRAFT: ${{ needs.prepare.outputs.draft }}
+      RELEASE_PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+      MAC_SIGNING_MODE: ${{ inputs.mac_signing }}
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Create or update public release
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s globstar nullglob
+
+          notes_file="release-notes.md"
+          {
+            echo "OpenTurtle OS Desktop ${TAG}"
+            echo
+            echo "Recommended downloads:"
+            echo "- Windows x64: https://github.com/${RELEASE_REPOSITORY}/releases/download/${TAG}/OpenTurtleOSSetup.exe"
+            echo "- macOS Universal: https://github.com/${RELEASE_REPOSITORY}/releases/download/${TAG}/OpenTurtle.OS-darwin-universal-${VERSION}.dmg"
+            echo
+            if [ "${MAC_SIGNING_MODE}" = "unsigned_test" ]; then
+              echo "macOS signing: unsigned test build. If macOS blocks the first launch, open System Settings > Privacy & Security and choose Allow Anyway, then open the app again."
+              echo
+            fi
+            echo "Attached ZIP, NUPKG, and RELEASES files are update feed artifacts for the desktop auto-updater."
+          } > "${notes_file}"
+
+          release_args=(
+            "--repo" "${RELEASE_REPOSITORY}"
+            "--title" "OpenTurtle OS ${TAG}"
+            "--notes-file" "${notes_file}"
+            "--target" "main"
+          )
+          if [ "${RELEASE_DRAFT}" = "true" ]; then
+            release_args+=("--draft")
+          fi
+          if [ "${RELEASE_PRERELEASE}" = "true" ]; then
+            release_args+=("--prerelease")
+          fi
+
+          if gh release view "${TAG}" --repo "${RELEASE_REPOSITORY}" >/dev/null 2>&1; then
+            gh release edit "${TAG}" \
+              --repo "${RELEASE_REPOSITORY}" \
+              --title "OpenTurtle OS ${TAG}" \
+              --notes-file "${notes_file}"
+          else
+            gh release create "${TAG}" "${release_args[@]}"
+          fi
+
+          rm -rf release-upload
+          mkdir -p release-upload
+          for asset in release-assets/**/*; do
+            if [ ! -f "${asset}" ]; then
+              continue
+            fi
+
+            base="$(basename "${asset}")"
+            normalized="${base// /.}"
+            case "${asset}" in
+              *renderer-update/*)
+                normalized="${base}"
+                ;;
+              *OpenTurtle.OS-darwin-universal-${VERSION}.zip)
+                cp "${asset}" "release-upload/OpenTurtle.OS-darwin-universal-${VERSION}.zip"
+                cp "${asset}" "release-upload/OpenTurtle.OS-darwin-arm64-${VERSION}.zip"
+                cp "${asset}" "release-upload/OpenTurtle.OS-darwin-x64-${VERSION}.zip"
+                continue
+                ;;
+              *OpenTurtle.OS-darwin-universal-${VERSION}.zip.blockmap)
+                normalized="OpenTurtle.OS-darwin-universal-${VERSION}.zip.blockmap"
+                ;;
+              *OpenTurtle.OS-darwin-universal-${VERSION}.dmg)
+                normalized="OpenTurtle.OS-darwin-universal-${VERSION}.dmg"
+                ;;
+              *OpenTurtle.OS-darwin-universal-${VERSION}.dmg.blockmap)
+                normalized="OpenTurtle.OS-darwin-universal-${VERSION}.dmg.blockmap"
+                ;;
+              *desktop-macos-universal-*.zip)
+                cp "${asset}" "release-upload/OpenTurtle.OS-darwin-arm64-${VERSION}.zip"
+                cp "${asset}" "release-upload/OpenTurtle.OS-darwin-x64-${VERSION}.zip"
+                continue
+                ;;
+              *OpenTurtleOSSetup.exe)
+                normalized="OpenTurtleOSSetup.exe"
+                ;;
+              */RELEASES)
+                normalized="RELEASES"
+                ;;
+            esac
+
+            cp "${asset}" "release-upload/${normalized}"
+          done
+
+          ls -lh release-upload
+          gh release upload "${TAG}" release-upload/* --repo "${RELEASE_REPOSITORY}" --clobber
