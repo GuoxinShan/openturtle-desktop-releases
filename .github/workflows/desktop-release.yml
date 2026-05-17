@@ -8,8 +8,7 @@ name: Desktop Release
 #   1. Push a tag `vX.Y.Z` to THIS repo  -> signed release, builds private main
 #      HEAD, version taken from the tag name. This is the normal release path.
 #   2. workflow_dispatch                 -> manual fallback; bumps the version
-#      in the private source repo and tags it, can build any branch, supports
-#      unsigned_test builds.
+#      in the private source repo and tags it, can build any branch.
 
 on:
   push:
@@ -51,15 +50,6 @@ on:
         required: true
         default: false
         type: boolean
-      mac_signing:
-        description: macOS signing mode
-        required: true
-        default: developer_id
-        type: choice
-        options:
-          - developer_id
-          - unsigned_test
-
 permissions:
   contents: write
 
@@ -82,7 +72,6 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
       build_ref: ${{ steps.version.outputs.build_ref }}
-      mac_signing: ${{ steps.mode.outputs.mac_signing }}
       prerelease: ${{ steps.mode.outputs.prerelease }}
       draft: ${{ steps.mode.outputs.draft }}
     steps:
@@ -93,17 +82,14 @@ jobs:
           set -euo pipefail
           if [ "${{ github.event_name }}" = "push" ]; then
             # Tag-triggered releases are always signed and final.
-            echo "mac_signing=developer_id" >> "${GITHUB_OUTPUT}"
             echo "prerelease=false" >> "${GITHUB_OUTPUT}"
             echo "draft=false" >> "${GITHUB_OUTPUT}"
           else
-            echo "mac_signing=${{ inputs.mac_signing }}" >> "${GITHUB_OUTPUT}"
             echo "prerelease=${{ inputs.prerelease }}" >> "${GITHUB_OUTPUT}"
             echo "draft=${{ inputs.draft }}" >> "${GITHUB_OUTPUT}"
           fi
 
       - name: Require macOS signing secrets
-        if: steps.mode.outputs.mac_signing == 'developer_id'
         shell: bash
         run: |
           set -euo pipefail
@@ -210,10 +196,10 @@ jobs:
             os: windows-latest
             forge_platform: win32
             arch: x64
-          - label: macos-universal
+          - label: macos-split
             os: macos-15
             forge_platform: darwin
-            arch: universal
+            arch: split
     env:
       APPLE_SIGN_IDENTITY: ${{ secrets.APPLE_SIGN_IDENTITY }}
       APPLE_ID: ${{ secrets.APPLE_ID }}
@@ -287,7 +273,7 @@ jobs:
           }
 
       - name: Require macOS signing secrets
-        if: runner.os == 'macOS' && needs.prepare.outputs.mac_signing == 'developer_id'
+        if: runner.os == 'macOS'
         shell: bash
         run: |
           set -euo pipefail
@@ -318,7 +304,7 @@ jobs:
           fi
 
       - name: Import macOS signing certificate
-        if: runner.os == 'macOS' && needs.prepare.outputs.mac_signing == 'developer_id'
+        if: runner.os == 'macOS'
         shell: bash
         run: |
           certificate_path="${RUNNER_TEMP}/macos-signing.p12"
@@ -340,7 +326,7 @@ jobs:
           echo "APPLE_APP_SPECIFIC_PASSWORD=${APPLE_ID_PASSWORD}" >> "${GITHUB_ENV}"
 
       - name: Validate macOS signing identity
-        if: runner.os == 'macOS' && needs.prepare.outputs.mac_signing == 'developer_id'
+        if: runner.os == 'macOS'
         shell: bash
         run: |
           set -euo pipefail
@@ -359,7 +345,7 @@ jobs:
         run: pnpm --filter @openturtle/desktop build
 
       - name: Package renderer resource update
-        if: matrix.label == 'macos-universal'
+        if: matrix.label == 'macos-split'
         shell: bash
         env:
           TAG: ${{ needs.prepare.outputs.tag }}
@@ -400,65 +386,72 @@ jobs:
         run: pnpm --filter @openturtle/desktop make:mac
 
       - name: Verify macOS signature and notarization
-        if: runner.os == 'macOS' && needs.prepare.outputs.mac_signing == 'developer_id'
+        if: runner.os == 'macOS'
         shell: bash
         run: |
           set -euo pipefail
 
-          app_path="apps/desktop/out/builder/mac-${{ matrix.arch }}/OpenTurtle OS.app"
-          if [ ! -d "${app_path}" ]; then
-            echo "Packaged macOS app not found: ${app_path}" >&2
-            exit 1
-          fi
+          app_paths=(
+            "apps/desktop/out/builder/mac/OpenTurtle OS.app"
+            "apps/desktop/out/builder/mac-arm64/OpenTurtle OS.app"
+          )
 
-          codesign --verify --deep --strict --verbose=4 "${app_path}"
-          signature_info="$(codesign -dv --verbose=4 "${app_path}" 2>&1)"
-          printf '%s\n' "${signature_info}"
-
-          if printf '%s\n' "${signature_info}" | grep -q 'Signature=adhoc'; then
-            echo "macOS app was ad-hoc signed instead of Developer ID signed." >&2
-            exit 1
-          fi
-
-          if ! printf '%s\n' "${signature_info}" | grep -q "TeamIdentifier=${APPLE_TEAM_ID}"; then
-            echo "macOS app TeamIdentifier does not match APPLE_TEAM_ID." >&2
-            exit 1
-          fi
-
-          xcrun stapler validate "${app_path}"
-          spctl -a -vv -t exec "${app_path}"
-
-          test -f "apps/desktop/out/builder/latest-mac.yml"
-          test -f "apps/desktop/out/builder/OpenTurtle.OS-darwin-${{ matrix.arch }}-${{ needs.prepare.outputs.version }}.zip.blockmap"
-
-      - name: Verify unsigned macOS test package
-        if: runner.os == 'macOS' && needs.prepare.outputs.mac_signing == 'unsigned_test'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          app_path="apps/desktop/out/builder/mac-${{ matrix.arch }}/OpenTurtle OS.app"
-          main_executable="${app_path}/Contents/MacOS/OpenTurtle OS"
-          electron_framework="${app_path}/Contents/Frameworks/Electron Framework.framework/Versions/A/Electron Framework"
-
-          for target in "${main_executable}" "${electron_framework}"; do
-            if ! codesign --verify --strict --verbose=4 "${target}"; then
-              echo "Unsigned macOS test target is not code signed: ${target}"
-              continue
-            fi
-            signature_info="$(codesign -dv --verbose=4 "${target}" 2>&1)"
-            printf '%s\n' "${signature_info}"
-
-            if printf '%s\n' "${signature_info}" | grep -q 'TeamIdentifier='; then
-              echo "Unsigned macOS test package must not use a Developer ID signature: ${target}" >&2
+          for app_path in "${app_paths[@]}"; do
+            if [ ! -d "${app_path}" ]; then
+              echo "Packaged macOS app not found: ${app_path}" >&2
               exit 1
             fi
 
-            if printf '%s\n' "${signature_info}" | grep -q 'flags=.*runtime'; then
-              echo "Unsigned macOS test package must not use hardened runtime: ${target}" >&2
+            codesign --verify --deep --strict --verbose=4 "${app_path}"
+            signature_info="$(codesign -dv --verbose=4 "${app_path}" 2>&1)"
+            printf '%s\n' "${signature_info}"
+
+            if printf '%s\n' "${signature_info}" | grep -q 'Signature=adhoc'; then
+              echo "macOS app was ad-hoc signed instead of Developer ID signed: ${app_path}" >&2
+              exit 1
+            fi
+
+            if ! printf '%s\n' "${signature_info}" | grep -q "TeamIdentifier=${APPLE_TEAM_ID}"; then
+              echo "macOS app TeamIdentifier does not match APPLE_TEAM_ID: ${app_path}" >&2
+              exit 1
+            fi
+
+            xcrun stapler validate "${app_path}"
+            spctl -a -vv -t exec "${app_path}"
+          done
+
+      - name: Verify macOS architecture artifacts
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="${{ needs.prepare.outputs.version }}"
+          out_dir="apps/desktop/out/builder"
+          expected_artifacts=(
+            "${out_dir}/OpenTurtle.OS-darwin-x64-${version}.dmg"
+            "${out_dir}/OpenTurtle.OS-darwin-arm64-${version}.dmg"
+            "${out_dir}/OpenTurtle.OS-darwin-x64-${version}.zip"
+            "${out_dir}/OpenTurtle.OS-darwin-arm64-${version}.zip"
+            "${out_dir}/OpenTurtle.OS-darwin-x64-${version}.zip.blockmap"
+            "${out_dir}/OpenTurtle.OS-darwin-arm64-${version}.zip.blockmap"
+          )
+
+          for artifact in "${expected_artifacts[@]}"; do
+            if [ ! -f "${artifact}" ]; then
+              echo "Expected macOS architecture artifact not found: ${artifact}" >&2
               exit 1
             fi
           done
+
+          feed_path="${out_dir}/latest-mac.yml"
+          test -f "${feed_path}"
+          grep -F "OpenTurtle.OS-darwin-x64-${version}.zip" "${feed_path}"
+          grep -F "OpenTurtle.OS-darwin-arm64-${version}.zip" "${feed_path}"
+          if grep -F "darwin-universal" "${feed_path}"; then
+            echo "latest-mac.yml must not reference universal macOS update artifacts." >&2
+            exit 1
+          fi
 
       - name: Smoke test packaged app
         if: runner.os == 'Windows' || runner.os == 'macOS'
@@ -495,7 +488,6 @@ jobs:
       RELEASE_REPOSITORY: GuoxinShan/openturtle-desktop-releases
       RELEASE_DRAFT: ${{ needs.prepare.outputs.draft }}
       RELEASE_PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
-      MAC_SIGNING_MODE: ${{ needs.prepare.outputs.mac_signing }}
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -514,12 +506,9 @@ jobs:
             echo
             echo "Recommended downloads:"
             echo "- Windows x64: https://github.com/${RELEASE_REPOSITORY}/releases/download/${TAG}/OpenTurtleOSSetup.exe"
-            echo "- macOS Universal: https://github.com/${RELEASE_REPOSITORY}/releases/download/${TAG}/OpenTurtle.OS-darwin-universal-${VERSION}.dmg"
+            echo "- macOS Apple Silicon: https://github.com/${RELEASE_REPOSITORY}/releases/download/${TAG}/OpenTurtle.OS-darwin-arm64-${VERSION}.dmg"
+            echo "- macOS Intel: https://github.com/${RELEASE_REPOSITORY}/releases/download/${TAG}/OpenTurtle.OS-darwin-x64-${VERSION}.dmg"
             echo
-            if [ "${MAC_SIGNING_MODE}" = "unsigned_test" ]; then
-              echo "macOS signing: unsigned test build. If macOS blocks the first launch, open System Settings > Privacy & Security and choose Allow Anyway, then open the app again."
-              echo
-            fi
             echo "Attached ZIP, NUPKG, and RELEASES files are update feed artifacts for the desktop auto-updater."
           } > "${notes_file}"
 
@@ -557,26 +546,6 @@ jobs:
             case "${asset}" in
               *renderer-update/*)
                 normalized="${base}"
-                ;;
-              *OpenTurtle.OS-darwin-universal-${VERSION}.zip)
-                cp "${asset}" "release-upload/OpenTurtle.OS-darwin-universal-${VERSION}.zip"
-                cp "${asset}" "release-upload/OpenTurtle.OS-darwin-arm64-${VERSION}.zip"
-                cp "${asset}" "release-upload/OpenTurtle.OS-darwin-x64-${VERSION}.zip"
-                continue
-                ;;
-              *OpenTurtle.OS-darwin-universal-${VERSION}.zip.blockmap)
-                normalized="OpenTurtle.OS-darwin-universal-${VERSION}.zip.blockmap"
-                ;;
-              *OpenTurtle.OS-darwin-universal-${VERSION}.dmg)
-                normalized="OpenTurtle.OS-darwin-universal-${VERSION}.dmg"
-                ;;
-              *OpenTurtle.OS-darwin-universal-${VERSION}.dmg.blockmap)
-                normalized="OpenTurtle.OS-darwin-universal-${VERSION}.dmg.blockmap"
-                ;;
-              *desktop-macos-universal-*.zip)
-                cp "${asset}" "release-upload/OpenTurtle.OS-darwin-arm64-${VERSION}.zip"
-                cp "${asset}" "release-upload/OpenTurtle.OS-darwin-x64-${VERSION}.zip"
-                continue
                 ;;
               *OpenTurtleOSSetup.exe)
                 normalized="OpenTurtleOSSetup.exe"
