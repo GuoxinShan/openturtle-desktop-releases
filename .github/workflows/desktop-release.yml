@@ -196,10 +196,17 @@ jobs:
             os: windows-latest
             forge_platform: win32
             arch: x64
-          - label: macos-split
+            mac_app_dir: ''
+          - label: macos-x64
             os: macos-15
             forge_platform: darwin
-            arch: split
+            arch: x64
+            mac_app_dir: mac
+          - label: macos-arm64
+            os: macos-15
+            forge_platform: darwin
+            arch: arm64
+            mac_app_dir: mac-arm64
     env:
       APPLE_SIGN_IDENTITY: ${{ secrets.APPLE_SIGN_IDENTITY }}
       APPLE_ID: ${{ secrets.APPLE_ID }}
@@ -259,6 +266,19 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-electron-${{ matrix.arch }}-
             ${{ runner.os }}-electron-
+
+      - name: Restore Electron Builder cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/electron-builder
+            ~/Library/Caches/electron-builder
+            ~/AppData/Local/electron-builder
+            ~/AppData/Local/electron-builder/Cache
+          key: ${{ runner.os }}-electron-builder-${{ matrix.arch }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-electron-builder-${{ matrix.arch }}-
+            ${{ runner.os }}-electron-builder-
 
       - name: Restore Windows certificate
         if: runner.os == 'Windows'
@@ -345,7 +365,7 @@ jobs:
         run: pnpm --filter @openturtle/desktop build
 
       - name: Package renderer resource update
-        if: matrix.label == 'macos-split'
+        if: matrix.label == 'macos-arm64'
         shell: bash
         env:
           TAG: ${{ needs.prepare.outputs.tag }}
@@ -383,7 +403,7 @@ jobs:
 
       - name: Make macOS desktop artifacts
         if: runner.os == 'macOS'
-        run: pnpm --filter @openturtle/desktop make:mac
+        run: pnpm --filter @openturtle/desktop exec electron-builder --mac dmg zip --${{ matrix.arch }} --publish never --config electron-builder.config.cjs
 
       - name: Verify macOS signature and notarization
         if: runner.os == 'macOS'
@@ -391,34 +411,29 @@ jobs:
         run: |
           set -euo pipefail
 
-          app_paths=(
-            "apps/desktop/out/builder/mac/OpenTurtle OS.app"
-            "apps/desktop/out/builder/mac-arm64/OpenTurtle OS.app"
-          )
+          app_path="apps/desktop/out/builder/${{ matrix.mac_app_dir }}/OpenTurtle OS.app"
 
-          for app_path in "${app_paths[@]}"; do
-            if [ ! -d "${app_path}" ]; then
-              echo "Packaged macOS app not found: ${app_path}" >&2
-              exit 1
-            fi
+          if [ ! -d "${app_path}" ]; then
+            echo "Packaged macOS app not found: ${app_path}" >&2
+            exit 1
+          fi
 
-            codesign --verify --deep --strict --verbose=4 "${app_path}"
-            signature_info="$(codesign -dv --verbose=4 "${app_path}" 2>&1)"
-            printf '%s\n' "${signature_info}"
+          codesign --verify --deep --strict --verbose=4 "${app_path}"
+          signature_info="$(codesign -dv --verbose=4 "${app_path}" 2>&1)"
+          printf '%s\n' "${signature_info}"
 
-            if printf '%s\n' "${signature_info}" | grep -q 'Signature=adhoc'; then
-              echo "macOS app was ad-hoc signed instead of Developer ID signed: ${app_path}" >&2
-              exit 1
-            fi
+          if printf '%s\n' "${signature_info}" | grep -q 'Signature=adhoc'; then
+            echo "macOS app was ad-hoc signed instead of Developer ID signed: ${app_path}" >&2
+            exit 1
+          fi
 
-            if ! printf '%s\n' "${signature_info}" | grep -q "TeamIdentifier=${APPLE_TEAM_ID}"; then
-              echo "macOS app TeamIdentifier does not match APPLE_TEAM_ID: ${app_path}" >&2
-              exit 1
-            fi
+          if ! printf '%s\n' "${signature_info}" | grep -q "TeamIdentifier=${APPLE_TEAM_ID}"; then
+            echo "macOS app TeamIdentifier does not match APPLE_TEAM_ID: ${app_path}" >&2
+            exit 1
+          fi
 
-            xcrun stapler validate "${app_path}"
-            spctl -a -vv -t exec "${app_path}"
-          done
+          xcrun stapler validate "${app_path}"
+          spctl -a -vv -t exec "${app_path}"
 
       - name: Verify macOS architecture artifacts
         if: runner.os == 'macOS'
@@ -427,14 +442,12 @@ jobs:
           set -euo pipefail
 
           version="${{ needs.prepare.outputs.version }}"
+          arch="${{ matrix.arch }}"
           out_dir="apps/desktop/out/builder"
           expected_artifacts=(
-            "${out_dir}/OpenTurtle.OS-darwin-x64-${version}.dmg"
-            "${out_dir}/OpenTurtle.OS-darwin-arm64-${version}.dmg"
-            "${out_dir}/OpenTurtle.OS-darwin-x64-${version}.zip"
-            "${out_dir}/OpenTurtle.OS-darwin-arm64-${version}.zip"
-            "${out_dir}/OpenTurtle.OS-darwin-x64-${version}.zip.blockmap"
-            "${out_dir}/OpenTurtle.OS-darwin-arm64-${version}.zip.blockmap"
+            "${out_dir}/OpenTurtle.OS-darwin-${arch}-${version}.dmg"
+            "${out_dir}/OpenTurtle.OS-darwin-${arch}-${version}.zip"
+            "${out_dir}/OpenTurtle.OS-darwin-${arch}-${version}.zip.blockmap"
           )
 
           for artifact in "${expected_artifacts[@]}"; do
@@ -446,15 +459,21 @@ jobs:
 
           feed_path="${out_dir}/latest-mac.yml"
           test -f "${feed_path}"
-          grep -F "OpenTurtle.OS-darwin-x64-${version}.zip" "${feed_path}"
-          grep -F "OpenTurtle.OS-darwin-arm64-${version}.zip" "${feed_path}"
+          grep -F "OpenTurtle.OS-darwin-${arch}-${version}.zip" "${feed_path}"
           if grep -F "darwin-universal" "${feed_path}"; then
             echo "latest-mac.yml must not reference universal macOS update artifacts." >&2
             exit 1
           fi
+          cp "${feed_path}" "${out_dir}/latest-mac-${arch}.yml"
 
-      - name: Smoke test packaged app
-        if: runner.os == 'Windows' || runner.os == 'macOS'
+      - name: Smoke test packaged app (Windows)
+        if: runner.os == 'Windows'
+        run: pnpm --filter @openturtle/desktop smoke:packaged
+
+      - name: Smoke test packaged app (macOS)
+        if: runner.os == 'macOS'
+        env:
+          OPENTURTLE_PACKAGED_EXE: apps/desktop/out/builder/${{ matrix.mac_app_dir }}/OpenTurtle OS.app/Contents/MacOS/OpenTurtle OS
         run: pnpm --filter @openturtle/desktop smoke:packaged
 
       - name: Upload desktop artifacts
@@ -547,6 +566,9 @@ jobs:
               *renderer-update/*)
                 normalized="${base}"
                 ;;
+              */latest-mac.yml|*/latest-mac-*.yml)
+                continue
+                ;;
               *OpenTurtleOSSetup.exe)
                 normalized="OpenTurtleOSSetup.exe"
                 ;;
@@ -557,6 +579,81 @@ jobs:
 
             cp "${asset}" "release-upload/${normalized}"
           done
+
+          node <<'NODE'
+          const fs = require('node:fs')
+          const path = require('node:path')
+
+          const root = 'release-assets'
+          const out = 'release-upload/latest-mac.yml'
+          const version = process.env.VERSION
+
+          function walk(dir) {
+            const entries = []
+            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+              const fullPath = path.join(dir, entry.name)
+              if (entry.isDirectory()) entries.push(...walk(fullPath))
+              else if (entry.isFile()) entries.push(fullPath)
+            }
+            return entries
+          }
+
+          function findFeed(arch) {
+            const name = `latest-mac-${arch}.yml`
+            const match = walk(root).find((file) => path.basename(file) === name)
+            if (!match) throw new Error(`Missing ${name}`)
+            return match
+          }
+
+          function parseFeed(file) {
+            const text = fs.readFileSync(file, 'utf8')
+            const entries = []
+            const regex = /-\s+url:\s+([^\n]+)\n\s+sha512:\s+([^\n]+)\n\s+size:\s+([0-9]+)/g
+            let match
+            while ((match = regex.exec(text)) !== null) {
+              entries.push({
+                url: match[1].trim(),
+                sha512: match[2].trim(),
+                size: Number(match[3]),
+              })
+            }
+            return entries
+          }
+
+          const byUrl = new Map()
+          for (const arch of ['x64', 'arm64']) {
+            for (const entry of parseFeed(findFeed(arch))) {
+              byUrl.set(entry.url, entry)
+            }
+          }
+
+          const orderedUrls = [
+            `OpenTurtle.OS-darwin-x64-${version}.zip`,
+            `OpenTurtle.OS-darwin-arm64-${version}.zip`,
+            `OpenTurtle.OS-darwin-x64-${version}.dmg`,
+            `OpenTurtle.OS-darwin-arm64-${version}.dmg`,
+          ]
+          const entries = orderedUrls.map((url) => byUrl.get(url))
+          const missing = orderedUrls.filter((url, index) => !entries[index])
+          if (missing.length > 0) {
+            throw new Error(`Missing mac update entries: ${missing.join(', ')}`)
+          }
+
+          const primary = entries[0]
+          const lines = [
+            `version: ${version}`,
+            'files:',
+            ...entries.flatMap((entry) => [
+              `  - url: ${entry.url}`,
+              `    sha512: ${entry.sha512}`,
+              `    size: ${entry.size}`,
+            ]),
+            `path: ${primary.url}`,
+            `sha512: ${primary.sha512}`,
+            `releaseDate: '${new Date().toISOString()}'`,
+          ]
+          fs.writeFileSync(out, `${lines.join('\n')}\n`)
+          NODE
 
           ls -lh release-upload
           gh release upload "${TAG}" release-upload/* --repo "${RELEASE_REPOSITORY}" --clobber
