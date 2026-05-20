@@ -361,6 +361,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --prefer-offline
 
+      - name: Guard desktop auto-update quit path
+        run: pnpm test:desktop-update-guard
+
       - name: Build desktop
         run: pnpm --filter @openturtle/desktop build
 
