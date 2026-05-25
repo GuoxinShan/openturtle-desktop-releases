@@ -1,0 +1,345 @@
+name: Desktop Renderer Release
+
+# Publishes a renderer resource update without building full desktop installers.
+# The workflow runs in this public release repository, but checks out the
+# private source repository with SOURCE_REPO_TOKEN.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Private source branch, tag, or SHA to build
+        required: true
+        default: main
+        type: string
+      base_ref:
+        description: Private source ref used for renderer-only diff validation
+        required: true
+        default: HEAD^
+        type: string
+      changed_files:
+        description: Optional newline-separated file list; overrides base_ref diff
+        required: false
+        type: string
+      release_tag:
+        description: Public release tag to attach renderer assets to; use latest for the latest release
+        required: true
+        default: latest
+        type: string
+      min_shell_version:
+        description: Minimum desktop shell version; empty uses apps/desktop/package.json
+        required: false
+        type: string
+      max_shell_version:
+        description: Optional maximum desktop shell version
+        required: false
+        type: string
+      renderer_version:
+        description: Optional exact renderer semver; empty auto-generates max(min shell, release tag)+1-renderer.timestamp
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-renderer-release
+  cancel-in-progress: false
+
+jobs:
+  publish-renderer:
+    name: Publish renderer update
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_REPOSITORY: GuoxinShan/openturtle-desktop-releases
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          repository: aka-danielZhang/openturtle
+          ref: ${{ inputs.source_ref }}
+          token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Setup pnpm
+        run: |
+          npm install -g pnpm@9.15.0
+          pnpm --version
+
+      - name: Configure pnpm store
+        run: pnpm config set store-dir .pnpm-store
+
+      - name: Restore pnpm store cache
+        uses: actions/cache@v4
+        with:
+          path: .pnpm-store
+          key: ${{ runner.os }}-pnpm-store-renderer-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-renderer-
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --prefer-offline
+
+      - name: Resolve public release target
+        id: target
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG_INPUT: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          release_tag="${RELEASE_TAG_INPUT}"
+          if [ -z "${release_tag}" ] || [ "${release_tag}" = "latest" ]; then
+            release_tag="$(gh release view --repo "${RELEASE_REPOSITORY}" --json tagName --jq '.tagName')"
+          else
+            gh release view "${release_tag}" --repo "${RELEASE_REPOSITORY}" >/dev/null
+          fi
+
+          echo "release_tag=${release_tag}" >> "${GITHUB_OUTPUT}"
+
+      - name: Resolve renderer version
+        id: version
+        shell: bash
+        env:
+          MIN_SHELL_VERSION_INPUT: ${{ inputs.min_shell_version }}
+          RENDERER_VERSION_INPUT: ${{ inputs.renderer_version }}
+          RELEASE_TAG: ${{ steps.target.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          min_shell_version="${MIN_SHELL_VERSION_INPUT}"
+          if [ -z "${min_shell_version}" ]; then
+            min_shell_version="$(node -p "require('./apps/desktop/package.json').version")"
+          fi
+
+          renderer_version="${RENDERER_VERSION_INPUT}"
+          if [ -z "${renderer_version}" ]; then
+            timestamp="$(date -u +"%Y%m%d%H%M%S")"
+            renderer_version="$(MIN_SHELL_VERSION="${min_shell_version}" RELEASE_TAG="${RELEASE_TAG}" RENDERER_TIMESTAMP="${timestamp}" node <<'NODE'
+          function parseSemver(value) {
+            const match = String(value || '').trim().replace(/^v/i, '').match(/^(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]+)?$/)
+            if (!match) return null
+            return {
+              major: Number(match[1]),
+              minor: Number(match[2]),
+              patch: Number(match[3]),
+            }
+          }
+
+          function compareSemver(a, b) {
+            for (const key of ['major', 'minor', 'patch']) {
+              if (a[key] > b[key]) return 1
+              if (a[key] < b[key]) return -1
+            }
+            return 0
+          }
+
+          const minShellVersion = parseSemver(process.env.MIN_SHELL_VERSION)
+          if (!minShellVersion) {
+            throw new Error(`Invalid desktop shell version: ${process.env.MIN_SHELL_VERSION}`)
+          }
+          const releaseVersion = parseSemver(process.env.RELEASE_TAG)
+          const base = releaseVersion && compareSemver(releaseVersion, minShellVersion) > 0
+            ? releaseVersion
+            : minShellVersion
+          console.log(`${base.major}.${base.minor}.${base.patch + 1}-renderer.${process.env.RENDERER_TIMESTAMP}`)
+          NODE
+            )"
+          fi
+
+          echo "min_shell_version=${min_shell_version}" >> "${GITHUB_OUTPUT}"
+          echo "renderer_version=${renderer_version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Validate release compatibility
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.target.outputs.release_tag }}
+          MIN_SHELL_VERSION: ${{ steps.version.outputs.min_shell_version }}
+        run: |
+          set -euo pipefail
+
+          node <<'NODE'
+          const releaseTag = process.env.RELEASE_TAG || ''
+          const minShellVersion = process.env.MIN_SHELL_VERSION || ''
+
+          function parseSemver(value) {
+            const match = String(value).trim().replace(/^v/i, '').match(/^(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]+)?$/)
+            if (!match) return null
+            return [Number(match[1]), Number(match[2]), Number(match[3])]
+          }
+
+          const releaseVersion = parseSemver(releaseTag)
+          const minVersion = parseSemver(minShellVersion)
+          if (!releaseVersion || !minVersion) {
+            console.log(`Skipping compatibility comparison for release=${releaseTag} minShellVersion=${minShellVersion}`)
+            process.exit(0)
+          }
+
+          for (let i = 0; i < 3; i += 1) {
+            if (minVersion[i] < releaseVersion[i]) process.exit(0)
+            if (minVersion[i] > releaseVersion[i]) {
+              throw new Error(`min_shell_version ${minShellVersion} is newer than release tag ${releaseTag}; publish a full desktop release first or choose the matching tag.`)
+            }
+          }
+          NODE
+
+      - name: Validate renderer-only scope
+        id: route
+        shell: bash
+        env:
+          BASE_REF_INPUT: ${{ inputs.base_ref }}
+          CHANGED_FILES_INPUT: ${{ inputs.changed_files }}
+          MIN_SHELL_VERSION: ${{ steps.version.outputs.min_shell_version }}
+          RENDERER_VERSION: ${{ steps.version.outputs.renderer_version }}
+        run: |
+          set -euo pipefail
+
+          export MODE=auto
+          export HEAD_REF=HEAD
+          export BASE_REF="${BASE_REF_INPUT}"
+          export MIN_SHELL_VERSION
+          export RENDERER_VERSION
+          if [ -n "${CHANGED_FILES_INPUT}" ]; then
+            export CHANGED_FILES="${CHANGED_FILES_INPUT}"
+          fi
+
+          node scripts/desktop-update-router.mjs | tee "${RUNNER_TEMP}/desktop-update-router.json"
+          mode="$(node -e "const fs=require('node:fs'); console.log(JSON.parse(fs.readFileSync(process.argv[1], 'utf8')).mode)" "${RUNNER_TEMP}/desktop-update-router.json")"
+          if [ "${mode}" != "renderer" ]; then
+            echo "desktop-update-router selected mode=${mode}; renderer-only release is blocked." >&2
+            exit 1
+          fi
+
+      - name: Build desktop renderer
+        run: pnpm --filter @openturtle/desktop build
+
+      - name: Package renderer resource update
+        id: package
+        shell: bash
+        env:
+          TAG: ${{ steps.target.outputs.release_tag }}
+          VERSION: ${{ steps.version.outputs.renderer_version }}
+          MIN_SHELL_VERSION: ${{ steps.version.outputs.min_shell_version }}
+          MAX_SHELL_VERSION: ${{ inputs.max_shell_version }}
+        run: |
+          set -euo pipefail
+
+          update_dir="apps/desktop/out/renderer-update"
+          zip_name="OpenTurtle.OS-renderer-${VERSION}.zip"
+          zip_path="${update_dir}/${zip_name}"
+          manifest_path="${update_dir}/renderer-update.json"
+          versioned_manifest_path="${update_dir}/OpenTurtle.OS-renderer-${VERSION}.json"
+
+          mkdir -p "${update_dir}"
+          rm -f "${update_dir}"/OpenTurtle.OS-renderer-*.zip "${update_dir}"/OpenTurtle.OS-renderer-*.json "${manifest_path}"
+
+          (cd apps/desktop/dist/renderer && zip -qry "../../out/renderer-update/${zip_name}" .)
+          sha256="$(shasum -a 256 "${zip_path}" | awk '{print $1}')"
+          size="$(wc -c < "${zip_path}" | tr -d ' ')"
+          created_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+          TAG="${TAG}" \
+          VERSION="${VERSION}" \
+          MIN_SHELL_VERSION="${MIN_SHELL_VERSION}" \
+          MAX_SHELL_VERSION="${MAX_SHELL_VERSION}" \
+          RELEASE_REPOSITORY="${RELEASE_REPOSITORY}" \
+          ZIP_NAME="${zip_name}" \
+          SHA256="${sha256}" \
+          SIZE="${size}" \
+          CREATED_AT="${created_at}" \
+          MANIFEST_PATH="${manifest_path}" \
+          VERSIONED_MANIFEST_PATH="${versioned_manifest_path}" \
+          node <<'NODE'
+          const fs = require('node:fs')
+
+          const manifest = {
+            version: process.env.VERSION,
+            minShellVersion: process.env.MIN_SHELL_VERSION,
+            url: `https://github.com/${process.env.RELEASE_REPOSITORY}/releases/download/${process.env.TAG}/${process.env.ZIP_NAME}`,
+            sha256: process.env.SHA256,
+            size: Number(process.env.SIZE),
+            createdAt: process.env.CREATED_AT,
+          }
+          if (process.env.MAX_SHELL_VERSION) {
+            manifest.maxShellVersion = process.env.MAX_SHELL_VERSION
+          }
+
+          const text = `${JSON.stringify(manifest, null, 2)}\n`
+          fs.writeFileSync(process.env.MANIFEST_PATH, text)
+          fs.writeFileSync(process.env.VERSIONED_MANIFEST_PATH, text)
+          NODE
+
+          echo "zip_path=${zip_path}" >> "${GITHUB_OUTPUT}"
+          echo "manifest_path=${manifest_path}" >> "${GITHUB_OUTPUT}"
+          echo "versioned_manifest_path=${versioned_manifest_path}" >> "${GITHUB_OUTPUT}"
+          echo "sha256=${sha256}" >> "${GITHUB_OUTPUT}"
+
+      - name: Verify renderer package
+        shell: bash
+        env:
+          ZIP_PATH: ${{ steps.package.outputs.zip_path }}
+          MANIFEST_PATH: ${{ steps.package.outputs.manifest_path }}
+          EXPECTED_SHA256: ${{ steps.package.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+
+          test -f "${ZIP_PATH}"
+          test -f "${MANIFEST_PATH}"
+          unzip -l "${ZIP_PATH}" index.html
+          actual_sha256="$(shasum -a 256 "${ZIP_PATH}" | awk '{print $1}')"
+          test "${actual_sha256}" = "${EXPECTED_SHA256}"
+          node -e "const fs=require('node:fs'); const manifest=JSON.parse(fs.readFileSync(process.argv[1], 'utf8')); if (!manifest.version || !manifest.url || !manifest.sha256 || !manifest.minShellVersion) throw new Error('Invalid renderer manifest')" "${MANIFEST_PATH}"
+
+      - name: Upload renderer release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.target.outputs.release_tag }}
+          ZIP_PATH: ${{ steps.package.outputs.zip_path }}
+          MANIFEST_PATH: ${{ steps.package.outputs.manifest_path }}
+          VERSIONED_MANIFEST_PATH: ${{ steps.package.outputs.versioned_manifest_path }}
+        run: |
+          set -euo pipefail
+
+          gh release upload "${TAG}" \
+            "${ZIP_PATH}" \
+            "${VERSIONED_MANIFEST_PATH}" \
+            "${MANIFEST_PATH}" \
+            --repo "${RELEASE_REPOSITORY}" \
+            --clobber
+
+      - name: Verify uploaded renderer assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.target.outputs.release_tag }}
+          VERSION: ${{ steps.version.outputs.renderer_version }}
+          EXPECTED_SHA256: ${{ steps.package.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+
+          manifest_url="$(gh release view "${TAG}" --repo "${RELEASE_REPOSITORY}" --json assets --jq '.assets[] | select(.name=="renderer-update.json") | .url')"
+          zip_digest="$(gh release view "${TAG}" --repo "${RELEASE_REPOSITORY}" --json assets --jq ".assets[] | select(.name==\"OpenTurtle.OS-renderer-${VERSION}.zip\") | .digest")"
+          if [ "${zip_digest}" != "sha256:${EXPECTED_SHA256}" ]; then
+            echo "Uploaded zip digest mismatch: ${zip_digest}" >&2
+            exit 1
+          fi
+
+          manifest_tmp="${RUNNER_TEMP}/renderer-update.json"
+          zip_tmp="${RUNNER_TEMP}/renderer-update.zip"
+          curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/octet-stream" \
+            "${manifest_url}" \
+            -o "${manifest_tmp}"
+          zip_url="$(node -e "const fs=require('node:fs'); console.log(JSON.parse(fs.readFileSync(process.argv[1], 'utf8')).url)" "${manifest_tmp}")"
+          curl -fsSL "${zip_url}" -o "${zip_tmp}"
+          actual_sha256="$(shasum -a 256 "${zip_tmp}" | awk '{print $1}')"
+          test "${actual_sha256}" = "${EXPECTED_SHA256}"
+          unzip -l "${zip_tmp}" index.html
