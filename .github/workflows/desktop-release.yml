@@ -403,7 +403,11 @@ jobs:
 
       - name: Make Windows desktop artifacts
         if: runner.os == 'Windows'
-        run: pnpm --filter @openturtle/desktop exec electron-forge make --platform ${{ matrix.forge_platform }} --arch ${{ matrix.arch }}
+        shell: pwsh
+        working-directory: apps/desktop
+        run: |
+          pnpm exec electron-forge package --platform ${{ matrix.forge_platform }} --arch ${{ matrix.arch }}
+          pnpm exec electron-forge make --skip-package --platform ${{ matrix.forge_platform }} --arch ${{ matrix.arch }} --targets @electron-forge/maker-squirrel
 
       - name: Make macOS desktop artifacts
         if: runner.os == 'macOS'
@@ -472,7 +476,8 @@ jobs:
 
       - name: Smoke test packaged app (Windows)
         if: runner.os == 'Windows'
-        run: pnpm --filter @openturtle/desktop smoke:packaged
+        working-directory: apps/desktop
+        run: pnpm smoke:packaged
 
       - name: Smoke test packaged app (macOS)
         if: runner.os == 'macOS'
