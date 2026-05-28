@@ -406,8 +406,8 @@ jobs:
         shell: pwsh
         working-directory: apps/desktop
         run: |
-          pnpm exec electron-forge package --platform ${{ matrix.forge_platform }} --arch ${{ matrix.arch }}
-          pnpm exec electron-forge make --skip-package --platform ${{ matrix.forge_platform }} --arch ${{ matrix.arch }} --targets @electron-forge/maker-squirrel
+          pnpm exec electron-forge make --platform ${{ matrix.forge_platform }} --arch ${{ matrix.arch }}
+          Get-ChildItem -Path out -Recurse | Select-Object -ExpandProperty FullName
 
       - name: Make macOS desktop artifacts
         if: runner.os == 'macOS'
