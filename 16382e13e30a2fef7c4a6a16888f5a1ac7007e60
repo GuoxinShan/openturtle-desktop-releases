@@ -1,0 +1,24 @@
+README.md
+  s_ef7f1680814e28::t_5a9165d8cb1f3a 6-11
+.github/workflows/desktop-renderer-release.yml
+  s_ef7f1680814e28::t_940fda3c2eff15 38
+  s_ef7f1680814e28::t_54163c57aa051e 113,125-152
+  s_ef7f1680814e28::t_1f936856125e87 1-37,39-112,114-124,154-190,192-276,278-345
+  s_ef7f1680814e28::t_c9415f7763b1b7 153,191,277
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.0",
+  "base_commit_sha": "16382e13e30a2fef7c4a6a16888f5a1ac7007e60",
+  "prompts": {},
+  "sessions": {
+    "s_ef7f1680814e28": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e5ce8-b044-75a2-b109-6a0a443b6a0a",
+        "model": "gpt-5.5"
+      },
+      "human_author": "GuoxinShan <rockshan3906@gmail.com>"
+    }
+  }
+}

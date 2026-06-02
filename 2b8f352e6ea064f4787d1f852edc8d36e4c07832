@@ -1,0 +1,19 @@
+.github/workflows/desktop-release.yml
+  s_c00223b411b127::t_6cc569615f9f24 219,499,580-581
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.0",
+  "base_commit_sha": "2b8f352e6ea064f4787d1f852edc8d36e4c07832",
+  "prompts": {},
+  "sessions": {
+    "s_c00223b411b127": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e4df4-689a-7d21-9084-223404f03997",
+        "model": "gpt-5.5"
+      },
+      "human_author": "GuoxinShan <rockshan3906@gmail.com>"
+    }
+  }
+}
