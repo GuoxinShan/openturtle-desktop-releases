@@ -42,6 +42,9 @@ on:
 permissions:
   contents: write
 
+env:
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+
 concurrency:
   group: desktop-renderer-release
   cancel-in-progress: false
@@ -66,9 +69,11 @@ jobs:
         with:
           node-version: 24
 
-      - name: Setup pnpm
+      - name: Setup pnpm with Corepack
+        shell: bash
         run: |
-          npm install -g pnpm@9.15.0
+          corepack enable
+          corepack prepare pnpm@9.15.0 --activate
           pnpm --version
 
       - name: Configure pnpm store
@@ -84,7 +89,7 @@ jobs:
             ${{ runner.os }}-pnpm-store-
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile --prefer-offline
+        run: pnpm --filter @openturtle/desktop... install --frozen-lockfile --prefer-offline
 
       - name: Resolve public release target
         id: target

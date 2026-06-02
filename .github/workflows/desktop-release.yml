@@ -53,6 +53,9 @@ on:
 permissions:
   contents: write
 
+env:
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+
 concurrency:
   group: desktop-release
   cancel-in-progress: false
@@ -224,7 +227,7 @@ jobs:
           repository: aka-danielZhang/openturtle
           ref: ${{ needs.prepare.outputs.build_ref }}
           token: ${{ secrets.SOURCE_REPO_TOKEN }}
-          fetch-depth: 0
+          fetch-depth: 1
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -239,9 +242,11 @@ jobs:
           cd apps/desktop
           npm version "${{ needs.prepare.outputs.version }}" --no-git-tag-version --allow-same-version
 
-      - name: Setup pnpm
+      - name: Setup pnpm with Corepack
+        shell: bash
         run: |
-          npm install -g pnpm@9.15.0
+          corepack enable
+          corepack prepare pnpm@9.15.0 --activate
           pnpm --version
 
       - name: Configure pnpm store
@@ -249,7 +254,8 @@ jobs:
         run: pnpm config set store-dir .pnpm-store
 
       - name: Restore pnpm store cache
-        uses: actions/cache@v4
+        id: pnpm-store-cache
+        uses: actions/cache/restore@v4
         with:
           path: .pnpm-store
           key: ${{ runner.os }}-pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
@@ -360,9 +366,17 @@ jobs:
           fi
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile --prefer-offline
+        run: pnpm --filter @openturtle/desktop... install --frozen-lockfile --prefer-offline
+
+      - name: Save pnpm store cache
+        if: ${{ steps.pnpm-store-cache.outputs.cache-hit != 'true' && (matrix.label == 'windows-x64' || matrix.label == 'macos-arm64') }}
+        uses: actions/cache/save@v4
+        with:
+          path: .pnpm-store
+          key: ${{ steps.pnpm-store-cache.outputs.cache-primary-key }}
 
       - name: Guard desktop auto-update quit path
+        if: matrix.label == 'windows-x64'
         run: pnpm test:desktop-update-guard
 
       - name: Build desktop
