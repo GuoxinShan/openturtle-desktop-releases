@@ -421,21 +421,8 @@ jobs:
         working-directory: apps/desktop
         run: |
           $ErrorActionPreference = 'Stop'
-          pnpm exec electron-forge package --platform ${{ matrix.forge_platform }} --arch ${{ matrix.arch }}
-
-          $packagedExe = Join-Path 'out' 'OpenTurtle OS-win32-x64\OpenTurtleOS.exe'
-          if (-not (Test-Path $packagedExe)) {
-            Write-Host "Desktop directory listing:"
-            Get-ChildItem -Path . -Force | Select-Object -ExpandProperty FullName
-            if (Test-Path 'out') {
-              Write-Host "Forge out directory listing:"
-              Get-ChildItem -Path out -Recurse | Select-Object -ExpandProperty FullName
-            }
-            throw "Forge package did not create $packagedExe"
-          }
-
-          pnpm exec electron-forge make --skip-package --platform ${{ matrix.forge_platform }} --arch ${{ matrix.arch }}
-          Get-ChildItem -Path out -Recurse | Select-Object -ExpandProperty FullName
+          pnpm exec electron-builder --win nsis --x64 --publish never --config electron-builder.config.cjs
+          Get-ChildItem -Path out/builder -Recurse | Select-Object -ExpandProperty FullName
 
       - name: Make macOS desktop artifacts
         if: runner.os == 'macOS'
@@ -518,13 +505,9 @@ jobs:
         with:
           name: desktop-${{ matrix.label }}-${{ needs.prepare.outputs.tag }}
           path: |
-            apps/desktop/out/make/**/*.dmg
-            apps/desktop/out/make/**/*.zip
-            apps/desktop/out/make/**/*.exe
-            apps/desktop/out/make/**/*.nupkg
-            apps/desktop/out/make/**/RELEASES
             apps/desktop/out/builder/**/*.dmg
             apps/desktop/out/builder/**/*.zip
+            apps/desktop/out/builder/**/*.exe
             apps/desktop/out/builder/**/*.yml
             apps/desktop/out/builder/**/*.blockmap
             apps/desktop/out/renderer-update/*.zip
