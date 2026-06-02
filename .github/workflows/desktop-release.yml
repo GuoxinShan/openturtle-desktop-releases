@@ -505,11 +505,13 @@ jobs:
         with:
           name: desktop-${{ matrix.label }}-${{ needs.prepare.outputs.tag }}
           path: |
-            apps/desktop/out/builder/**/*.dmg
-            apps/desktop/out/builder/**/*.zip
-            apps/desktop/out/builder/**/*.exe
-            apps/desktop/out/builder/**/*.yml
-            apps/desktop/out/builder/**/*.blockmap
+            apps/desktop/out/builder/*.dmg
+            apps/desktop/out/builder/*.zip
+            apps/desktop/out/builder/*.exe
+            apps/desktop/out/builder/*.yml
+            apps/desktop/out/builder/*.blockmap
+            apps/desktop/out/builder/mac*/*.dmg
+            apps/desktop/out/builder/mac*/*.zip
             apps/desktop/out/renderer-update/*.zip
             apps/desktop/out/renderer-update/*.json
             apps/desktop/assets/icon.ico
