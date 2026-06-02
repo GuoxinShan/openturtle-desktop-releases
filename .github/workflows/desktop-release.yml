@@ -604,6 +604,9 @@ jobs:
             esac
 
             cp "${asset}" "release-upload/${normalized}"
+            if [[ "${normalized}" == OpenTurtle.OS-win-x64-"${VERSION}".exe ]]; then
+              cp "${asset}" "release-upload/OpenTurtleOSSetup.exe"
+            fi
           done
 
           node <<'NODE'
