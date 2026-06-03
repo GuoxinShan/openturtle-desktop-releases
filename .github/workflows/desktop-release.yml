@@ -51,7 +51,7 @@ on:
         default: false
         type: boolean
       mac_artifact_mode:
-        description: macOS artifacts to build: update skips DMG, installer includes DMG
+        description: "macOS artifacts to build: update skips DMG, installer includes DMG"
         required: true
         default: update
         type: choice
