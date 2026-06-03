@@ -50,6 +50,14 @@ on:
         required: true
         default: false
         type: boolean
+      mac_artifact_mode:
+        description: macOS artifacts to build: update skips DMG, installer includes DMG
+        required: true
+        default: update
+        type: choice
+        options:
+          - update
+          - installer
 permissions:
   contents: write
 
@@ -77,6 +85,7 @@ jobs:
       build_ref: ${{ steps.version.outputs.build_ref }}
       prerelease: ${{ steps.mode.outputs.prerelease }}
       draft: ${{ steps.mode.outputs.draft }}
+      mac_artifact_mode: ${{ steps.mode.outputs.mac_artifact_mode }}
     steps:
       - name: Resolve release mode
         id: mode
@@ -87,9 +96,11 @@ jobs:
             # Tag-triggered releases are always signed and final.
             echo "prerelease=false" >> "${GITHUB_OUTPUT}"
             echo "draft=false" >> "${GITHUB_OUTPUT}"
+            echo "mac_artifact_mode=update" >> "${GITHUB_OUTPUT}"
           else
             echo "prerelease=${{ inputs.prerelease }}" >> "${GITHUB_OUTPUT}"
             echo "draft=${{ inputs.draft }}" >> "${GITHUB_OUTPUT}"
+            echo "mac_artifact_mode=${{ inputs.mac_artifact_mode }}" >> "${GITHUB_OUTPUT}"
           fi
 
       - name: Require macOS signing secrets
@@ -220,6 +231,7 @@ jobs:
       WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
       WINDOWS_SIGN_WITH_PARAMS: ${{ secrets.WINDOWS_SIGN_WITH_PARAMS }}
       OPENTURTLE_WINDOWS_ICON_URL: https://github.com/GuoxinShan/openturtle-desktop-releases/releases/download/${{ needs.prepare.outputs.tag }}/OpenTurtle.OS.ico
+      MAC_ARTIFACT_MODE: ${{ needs.prepare.outputs.mac_artifact_mode }}
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
@@ -426,7 +438,14 @@ jobs:
 
       - name: Make macOS desktop artifacts
         if: runner.os == 'macOS'
-        run: pnpm --filter @openturtle/desktop exec electron-builder --mac dmg zip --${{ matrix.arch }} --publish never --config electron-builder.config.cjs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mac_targets=(zip)
+          if [ "${MAC_ARTIFACT_MODE}" = "installer" ]; then
+            mac_targets=(dmg zip)
+          fi
+          pnpm --filter @openturtle/desktop exec electron-builder --mac "${mac_targets[@]}" --${{ matrix.arch }} --publish never --config electron-builder.config.cjs
 
       - name: Verify macOS signature and notarization
         if: runner.os == 'macOS'
@@ -468,10 +487,12 @@ jobs:
           arch="${{ matrix.arch }}"
           out_dir="apps/desktop/out/builder"
           expected_artifacts=(
-            "${out_dir}/OpenTurtle.OS-darwin-${arch}-${version}.dmg"
             "${out_dir}/OpenTurtle.OS-darwin-${arch}-${version}.zip"
             "${out_dir}/OpenTurtle.OS-darwin-${arch}-${version}.zip.blockmap"
           )
+          if [ "${MAC_ARTIFACT_MODE}" = "installer" ]; then
+            expected_artifacts+=("${out_dir}/OpenTurtle.OS-darwin-${arch}-${version}.dmg")
+          fi
 
           for artifact in "${expected_artifacts[@]}"; do
             if [ ! -f "${artifact}" ]; then
@@ -530,6 +551,7 @@ jobs:
       RELEASE_REPOSITORY: GuoxinShan/openturtle-desktop-releases
       RELEASE_DRAFT: ${{ needs.prepare.outputs.draft }}
       RELEASE_PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+      MAC_ARTIFACT_MODE: ${{ needs.prepare.outputs.mac_artifact_mode }}
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -548,10 +570,15 @@ jobs:
             echo
             echo "Recommended downloads:"
             echo "- Windows x64: https://github.com/${RELEASE_REPOSITORY}/releases/download/${TAG}/OpenTurtleOSSetup.exe"
-            echo "- macOS Apple Silicon: https://github.com/${RELEASE_REPOSITORY}/releases/download/${TAG}/OpenTurtle.OS-darwin-arm64-${VERSION}.dmg"
-            echo "- macOS Intel: https://github.com/${RELEASE_REPOSITORY}/releases/download/${TAG}/OpenTurtle.OS-darwin-x64-${VERSION}.dmg"
+            if [ "${MAC_ARTIFACT_MODE}" = "installer" ]; then
+              echo "- macOS Apple Silicon: https://github.com/${RELEASE_REPOSITORY}/releases/download/${TAG}/OpenTurtle.OS-darwin-arm64-${VERSION}.dmg"
+              echo "- macOS Intel: https://github.com/${RELEASE_REPOSITORY}/releases/download/${TAG}/OpenTurtle.OS-darwin-x64-${VERSION}.dmg"
+            else
+              echo "- macOS Apple Silicon update archive: https://github.com/${RELEASE_REPOSITORY}/releases/download/${TAG}/OpenTurtle.OS-darwin-arm64-${VERSION}.zip"
+              echo "- macOS Intel update archive: https://github.com/${RELEASE_REPOSITORY}/releases/download/${TAG}/OpenTurtle.OS-darwin-x64-${VERSION}.zip"
+            fi
             echo
-            echo "Attached ZIP, NUPKG, and RELEASES files are update feed artifacts for the desktop auto-updater."
+            echo "Attached ZIP, NUPKG, blockmap, and RELEASES files are update feed artifacts for the desktop auto-updater."
           } > "${notes_file}"
 
           release_args=(
@@ -659,9 +686,13 @@ jobs:
           const orderedUrls = [
             `OpenTurtle.OS-darwin-x64-${version}.zip`,
             `OpenTurtle.OS-darwin-arm64-${version}.zip`,
-            `OpenTurtle.OS-darwin-x64-${version}.dmg`,
-            `OpenTurtle.OS-darwin-arm64-${version}.dmg`,
           ]
+          if (process.env.MAC_ARTIFACT_MODE === 'installer') {
+            orderedUrls.push(
+              `OpenTurtle.OS-darwin-x64-${version}.dmg`,
+              `OpenTurtle.OS-darwin-arm64-${version}.dmg`,
+            )
+          }
           const entries = orderedUrls.map((url) => byUrl.get(url))
           const missing = orderedUrls.filter((url, index) => !entries[index])
           if (missing.length > 0) {
