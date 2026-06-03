@@ -472,26 +472,83 @@ jobs:
             return hash.digest('hex')
           }
 
+          function nodeModulePath(packageName) {
+            return path.join('node_modules', ...packageName.split('/'))
+          }
+
+          function packageVersion(packageDir) {
+            const packageJsonPath = path.join(packageDir, 'package.json')
+            if (!fs.existsSync(packageJsonPath)) return null
+            const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'))
+            return String(packageJson.version || '').trim() || null
+          }
+
+          function siblingPackageVersion(packageName) {
+            const parts = packageName.split('/')
+            if (parts.length !== 2) return null
+            const scopeDir = path.join('node_modules', parts[0])
+            const targetPrefix = parts[1].replace(new RegExp(`-${platform}-${arch}$`), `-${platform}-`)
+            if (!fs.existsSync(scopeDir) || targetPrefix === parts[1]) return null
+            for (const entry of fs.readdirSync(scopeDir)) {
+              if (!entry.startsWith(targetPrefix)) continue
+              const version = packageVersion(path.join(scopeDir, entry))
+              if (version) return version
+            }
+            return null
+          }
+
+          function materializePackage(packageName, version) {
+            const existingDir = nodeModulePath(packageName)
+            if (fs.existsSync(path.join(existingDir, 'package.json'))) {
+              return {
+                packageDir: existingDir,
+                tarRoot: 'node_modules',
+                tarEntry: `./${packageName}`,
+              }
+            }
+
+            const tmpRoot = path.join(outDir, `.runtime-package-${packageName.replace(/[^a-zA-Z0-9_.-]/g, '-')}`)
+            fs.rmSync(tmpRoot, { recursive: true, force: true })
+            fs.mkdirSync(tmpRoot, { recursive: true })
+            const packOutput = execFileSync(
+              'npm',
+              ['pack', `${packageName}@${version}`, '--pack-destination', tmpRoot],
+              { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] },
+            ).trim()
+            const packedName = packOutput.split(/\r?\n/).filter(Boolean).pop()
+            if (!packedName) throw new Error(`npm pack produced no output for ${packageName}@${version}`)
+            execFileSync('tar', ['-xzf', path.join(tmpRoot, path.basename(packedName)), '-C', tmpRoot], { stdio: 'inherit' })
+            const materializedRoot = path.join(tmpRoot, 'node_modules')
+            const materializedDir = path.join(materializedRoot, ...packageName.split('/'))
+            fs.mkdirSync(path.dirname(materializedDir), { recursive: true })
+            fs.renameSync(path.join(tmpRoot, 'package'), materializedDir)
+            return {
+              packageDir: materializedDir,
+              tarRoot: materializedRoot,
+              tarEntry: `./${packageName}`,
+            }
+          }
+
           const entries = []
           for (const spec of specs) {
-            const packageDir = path.join('node_modules', ...spec.packageName.split('/'))
-            const packageJsonPath = path.join(packageDir, 'package.json')
-            if (!fs.existsSync(packageJsonPath)) {
-              console.log(`[runtime] skip missing ${spec.packageName}`)
+            const installedVersion = packageVersion(nodeModulePath(spec.packageName))
+            const version = installedVersion || siblingPackageVersion(spec.packageName)
+            if (!version) {
+              console.log(`[runtime] skip missing ${spec.packageName}; no sibling version found`)
               continue
             }
-            const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'))
-            const version = String(packageJson.version || '0.0.0').replace(`-${platform}-${arch}`, '')
-            const fileName = `OpenTurtle.OS-runtime-${spec.runtime}-${platform}-${arch}-${version}.tar.gz`
+            const materialized = materializePackage(spec.packageName, version)
+            const resolvedVersion = packageVersion(materialized.packageDir) || version
+            const fileName = `OpenTurtle.OS-runtime-${spec.runtime}-${platform}-${arch}-${resolvedVersion}.tar.gz`
             const outPath = path.join(outDir, fileName)
-            execFileSync('tar', ['-czf', outPath, '-C', 'node_modules', `./${spec.packageName}`], { stdio: 'inherit' })
+            execFileSync('tar', ['-czf', outPath, '-C', materialized.tarRoot, materialized.tarEntry], { stdio: 'inherit' })
             const digest = sha256(outPath)
             entries.push({
               provider: spec.provider,
               runtime: spec.runtime,
               platform,
               arch,
-              version,
+              version: resolvedVersion,
               url: `https://github.com/${releaseRepository}/releases/download/${tag}/${fileName}`,
               sha256: digest,
               executable: spec.executable,
