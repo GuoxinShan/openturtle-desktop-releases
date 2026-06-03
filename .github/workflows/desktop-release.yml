@@ -427,6 +427,83 @@ jobs:
           EOF
           cp "${manifest_path}" "${versioned_manifest_path}"
 
+
+      - name: Package provider runtime artifacts
+        shell: bash
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          RELEASE_REPOSITORY: GuoxinShan/openturtle-desktop-releases
+          RUNTIME_PLATFORM: ${{ matrix.forge_platform }}
+          RUNTIME_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('node:fs')
+          const path = require('node:path')
+          const crypto = require('node:crypto')
+          const { execFileSync } = require('node:child_process')
+
+          const platform = process.env.RUNTIME_PLATFORM
+          const arch = process.env.RUNTIME_ARCH
+          const tag = process.env.TAG
+          const releaseRepository = process.env.RELEASE_REPOSITORY
+          const outDir = path.join('apps', 'desktop', 'out', 'provider-runtimes')
+          fs.mkdirSync(outDir, { recursive: true })
+
+          const binaryExt = platform === 'win32' ? '.exe' : ''
+          const specs = [
+            {
+              provider: 'acp-claude',
+              runtime: 'claude',
+              packageName: `@anthropic-ai/claude-agent-sdk-${platform}-${arch}`,
+              executable: `@anthropic-ai/claude-agent-sdk-${platform}-${arch}/claude${binaryExt}`,
+            },
+            {
+              provider: 'acp-codex',
+              runtime: 'codex-acp',
+              packageName: `@zed-industries/codex-acp-${platform}-${arch}`,
+              executable: `@zed-industries/codex-acp-${platform}-${arch}/bin/codex-acp${binaryExt}`,
+            },
+          ]
+
+          function sha256(filePath) {
+            const hash = crypto.createHash('sha256')
+            hash.update(fs.readFileSync(filePath))
+            return hash.digest('hex')
+          }
+
+          const entries = []
+          for (const spec of specs) {
+            const packageDir = path.join('node_modules', ...spec.packageName.split('/'))
+            const packageJsonPath = path.join(packageDir, 'package.json')
+            if (!fs.existsSync(packageJsonPath)) {
+              console.log(`[runtime] skip missing ${spec.packageName}`)
+              continue
+            }
+            const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'))
+            const version = String(packageJson.version || '0.0.0').replace(`-${platform}-${arch}`, '')
+            const fileName = `OpenTurtle.OS-runtime-${spec.runtime}-${platform}-${arch}-${version}.tar.gz`
+            const outPath = path.join(outDir, fileName)
+            execFileSync('tar', ['-czf', outPath, '-C', 'node_modules', `./${spec.packageName}`], { stdio: 'inherit' })
+            const digest = sha256(outPath)
+            entries.push({
+              provider: spec.provider,
+              runtime: spec.runtime,
+              platform,
+              arch,
+              version,
+              url: `https://github.com/${releaseRepository}/releases/download/${tag}/${fileName}`,
+              sha256: digest,
+              executable: spec.executable,
+            })
+          }
+
+          fs.writeFileSync(
+            path.join(outDir, `provider-runtime-manifest-${platform}-${arch}.json`),
+            JSON.stringify({ runtimes: entries }, null, 2),
+          )
+          NODE
+
       - name: Make Windows desktop artifacts
         if: runner.os == 'Windows'
         shell: pwsh
@@ -535,6 +612,7 @@ jobs:
             apps/desktop/out/builder/mac*/*.zip
             apps/desktop/out/renderer-update/*.zip
             apps/desktop/out/renderer-update/*.json
+            apps/desktop/out/provider-runtimes/*
             apps/desktop/assets/icon.ico
           if-no-files-found: error
 
@@ -617,6 +695,9 @@ jobs:
                 normalized="${base}"
                 ;;
               */latest-mac.yml|*/latest-mac-*.yml)
+                continue
+                ;;
+              *provider-runtime-manifest-*.json)
                 continue
                 ;;
               *OpenTurtleOSSetup.exe)
@@ -713,6 +794,45 @@ jobs:
             `releaseDate: '${new Date().toISOString()}'`,
           ]
           fs.writeFileSync(out, `${lines.join('\n')}\n`)
+          NODE
+
+
+          node <<'NODE'
+          const fs = require('node:fs')
+          const path = require('node:path')
+
+          function walk(dir) {
+            const entries = []
+            if (!fs.existsSync(dir)) return entries
+            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+              const fullPath = path.join(dir, entry.name)
+              if (entry.isDirectory()) entries.push(...walk(fullPath))
+              else if (entry.isFile()) entries.push(fullPath)
+            }
+            return entries
+          }
+
+          const runtimes = []
+          for (const file of walk('release-assets')) {
+            if (!/^provider-runtime-manifest-.+\.json$/.test(path.basename(file))) continue
+            const manifest = JSON.parse(fs.readFileSync(file, 'utf8'))
+            if (Array.isArray(manifest.runtimes)) runtimes.push(...manifest.runtimes)
+          }
+
+          if (runtimes.length > 0) {
+            fs.writeFileSync(
+              'release-upload/provider-runtime-manifest.json',
+              JSON.stringify(
+                {
+                  version: process.env.VERSION,
+                  createdAt: new Date().toISOString(),
+                  runtimes,
+                },
+                null,
+                2,
+              ) + '\n',
+            )
+          }
           NODE
 
           ls -lh release-upload
