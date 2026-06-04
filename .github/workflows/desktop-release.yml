@@ -873,8 +873,6 @@ jobs:
             existing_runtime_manifest=""
           fi
 
-          EXISTING_RUNTIME_MANIFEST="${existing_runtime_manifest}" \
-          RUNTIME_UPLOAD_DIR="${runtime_upload_dir}" \
           node <<'NODE'
           const fs = require('node:fs')
           const path = require('node:path')
@@ -955,6 +953,8 @@ jobs:
           NODE
 
 
+          EXISTING_RUNTIME_MANIFEST="${existing_runtime_manifest}" \
+          RUNTIME_UPLOAD_DIR="${runtime_upload_dir}" \
           node <<'NODE'
           const fs = require('node:fs')
           const path = require('node:path')
