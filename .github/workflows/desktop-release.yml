@@ -1035,13 +1035,15 @@ jobs:
               gh release edit "${PROVIDER_RUNTIME_RELEASE_TAG}" \
                 --repo "${RELEASE_REPOSITORY}" \
                 --title "OpenTurtle Provider Runtimes" \
-                --notes-file "${runtime_notes_file}"
+                --notes-file "${runtime_notes_file}" \
+                --prerelease
             else
               gh release create "${PROVIDER_RUNTIME_RELEASE_TAG}" \
                 --repo "${RELEASE_REPOSITORY}" \
                 --title "OpenTurtle Provider Runtimes" \
                 --notes-file "${runtime_notes_file}" \
-                --target "main"
+                --target "main" \
+                --prerelease
             fi
 
             ls -lh "${runtime_upload_dir}"
