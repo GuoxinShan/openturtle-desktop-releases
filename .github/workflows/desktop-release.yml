@@ -58,6 +58,15 @@ on:
         options:
           - update
           - installer
+      runtime_artifact_mode:
+        description: "Provider runtime artifacts: auto reuses the runtime channel, force rebuilds, skip disables"
+        required: true
+        default: auto
+        type: choice
+        options:
+          - auto
+          - force
+          - skip
 permissions:
   contents: write
 
@@ -86,6 +95,7 @@ jobs:
       prerelease: ${{ steps.mode.outputs.prerelease }}
       draft: ${{ steps.mode.outputs.draft }}
       mac_artifact_mode: ${{ steps.mode.outputs.mac_artifact_mode }}
+      runtime_artifact_mode: ${{ steps.mode.outputs.runtime_artifact_mode }}
     steps:
       - name: Resolve release mode
         id: mode
@@ -97,10 +107,12 @@ jobs:
             echo "prerelease=false" >> "${GITHUB_OUTPUT}"
             echo "draft=false" >> "${GITHUB_OUTPUT}"
             echo "mac_artifact_mode=update" >> "${GITHUB_OUTPUT}"
+            echo "runtime_artifact_mode=auto" >> "${GITHUB_OUTPUT}"
           else
             echo "prerelease=${{ inputs.prerelease }}" >> "${GITHUB_OUTPUT}"
             echo "draft=${{ inputs.draft }}" >> "${GITHUB_OUTPUT}"
             echo "mac_artifact_mode=${{ inputs.mac_artifact_mode }}" >> "${GITHUB_OUTPUT}"
+            echo "runtime_artifact_mode=${{ inputs.runtime_artifact_mode }}" >> "${GITHUB_OUTPUT}"
           fi
 
       - name: Require macOS signing secrets
@@ -232,6 +244,8 @@ jobs:
       WINDOWS_SIGN_WITH_PARAMS: ${{ secrets.WINDOWS_SIGN_WITH_PARAMS }}
       OPENTURTLE_WINDOWS_ICON_URL: https://github.com/GuoxinShan/openturtle-desktop-releases/releases/download/${{ needs.prepare.outputs.tag }}/OpenTurtle.OS.ico
       MAC_ARTIFACT_MODE: ${{ needs.prepare.outputs.mac_artifact_mode }}
+      PROVIDER_RUNTIME_RELEASE_TAG: provider-runtimes
+      RUNTIME_ARTIFACT_MODE: ${{ needs.prepare.outputs.runtime_artifact_mode }}
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
@@ -429,9 +443,9 @@ jobs:
 
 
       - name: Package provider runtime artifacts
+        if: needs.prepare.outputs.runtime_artifact_mode != 'skip'
         shell: bash
         env:
-          TAG: ${{ needs.prepare.outputs.tag }}
           RELEASE_REPOSITORY: GuoxinShan/openturtle-desktop-releases
           RUNTIME_PLATFORM: ${{ matrix.forge_platform }}
           RUNTIME_ARCH: ${{ matrix.arch }}
@@ -445,8 +459,9 @@ jobs:
 
           const platform = process.env.RUNTIME_PLATFORM
           const arch = process.env.RUNTIME_ARCH
-          const tag = process.env.TAG
           const releaseRepository = process.env.RELEASE_REPOSITORY
+          const runtimeReleaseTag = process.env.PROVIDER_RUNTIME_RELEASE_TAG || 'provider-runtimes'
+          const runtimeArtifactMode = process.env.RUNTIME_ARTIFACT_MODE || 'auto'
           const outDir = path.join('apps', 'desktop', 'out', 'provider-runtimes')
           fs.mkdirSync(outDir, { recursive: true })
 
@@ -529,12 +544,76 @@ jobs:
             }
           }
 
+          function fetchJson(url) {
+            try {
+              const output = execFileSync(
+                'node',
+                [
+                  '-e',
+                  `
+                  const https = require('node:https');
+                  const url = process.argv[1];
+                  https.get(url, { headers: { 'User-Agent': 'openturtle-runtime-publisher' } }, (res) => {
+                    if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                      console.log(JSON.stringify({ redirect: new URL(res.headers.location, url).toString() }));
+                      res.resume();
+                      return;
+                    }
+                    if (res.statusCode < 200 || res.statusCode >= 300) {
+                      console.log(JSON.stringify({ error: 'HTTP ' + res.statusCode }));
+                      res.resume();
+                      return;
+                    }
+                    let body = '';
+                    res.setEncoding('utf8');
+                    res.on('data', chunk => { body += chunk; });
+                    res.on('end', () => process.stdout.write(body));
+                  }).on('error', err => {
+                    console.log(JSON.stringify({ error: err.message }));
+                  });
+                  `,
+                  url,
+                ],
+                { encoding: 'utf8' },
+              ).trim()
+              if (!output) return null
+              const parsed = JSON.parse(output)
+              if (parsed.redirect) return fetchJson(parsed.redirect)
+              if (parsed.error) return null
+              return parsed
+            } catch {
+              return null
+            }
+          }
+
+          const existingManifest = runtimeArtifactMode === 'force'
+            ? null
+            : fetchJson(`https://github.com/${releaseRepository}/releases/download/${runtimeReleaseTag}/provider-runtime-manifest.json`)
+          const existingRuntimes = Array.isArray(existingManifest?.runtimes)
+            ? existingManifest.runtimes
+            : []
+
+          function existingRuntimeEntry(spec, version) {
+            return existingRuntimes.find((entry) => (
+              entry.provider === spec.provider &&
+              entry.runtime === spec.runtime &&
+              entry.platform === platform &&
+              entry.arch === arch &&
+              entry.version === version
+            ))
+          }
+
           const entries = []
           for (const spec of specs) {
             const installedVersion = packageVersion(nodeModulePath(spec.packageName))
             const version = installedVersion || siblingPackageVersion(spec.packageName)
             if (!version) {
               console.log(`[runtime] skip missing ${spec.packageName}; no sibling version found`)
+              continue
+            }
+            const existingEntry = existingRuntimeEntry(spec, version)
+            if (existingEntry) {
+              console.log(`[runtime] reuse ${spec.runtime} ${platform}-${arch} ${version} from ${runtimeReleaseTag}`)
               continue
             }
             const materialized = materializePackage(spec.packageName, version)
@@ -549,16 +628,18 @@ jobs:
               platform,
               arch,
               version: resolvedVersion,
-              url: `https://github.com/${releaseRepository}/releases/download/${tag}/${fileName}`,
+              url: `https://github.com/${releaseRepository}/releases/download/${runtimeReleaseTag}/${fileName}`,
               sha256: digest,
               executable: spec.executable,
             })
           }
 
-          fs.writeFileSync(
-            path.join(outDir, `provider-runtime-manifest-${platform}-${arch}.json`),
-            JSON.stringify({ runtimes: entries }, null, 2),
-          )
+          if (entries.length > 0) {
+            fs.writeFileSync(
+              path.join(outDir, `provider-runtime-manifest-${platform}-${arch}.json`),
+              JSON.stringify({ runtimes: entries }, null, 2),
+            )
+          }
           NODE
 
       - name: Make Windows desktop artifacts
@@ -687,6 +768,7 @@ jobs:
       RELEASE_DRAFT: ${{ needs.prepare.outputs.draft }}
       RELEASE_PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
       MAC_ARTIFACT_MODE: ${{ needs.prepare.outputs.mac_artifact_mode }}
+      PROVIDER_RUNTIME_RELEASE_TAG: provider-runtimes
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -754,6 +836,9 @@ jobs:
               */latest-mac.yml|*/latest-mac-*.yml)
                 continue
                 ;;
+              *provider-runtimes/*)
+                continue
+                ;;
               *provider-runtime-manifest-*.json)
                 continue
                 ;;
@@ -774,6 +859,22 @@ jobs:
             fi
           done
 
+          runtime_upload_dir="runtime-channel-upload"
+          runtime_existing_dir="runtime-channel-existing"
+          rm -rf "${runtime_upload_dir}" "${runtime_existing_dir}"
+          mkdir -p "${runtime_upload_dir}" "${runtime_existing_dir}"
+
+          if gh release download "${PROVIDER_RUNTIME_RELEASE_TAG}" \
+            --repo "${RELEASE_REPOSITORY}" \
+            -p provider-runtime-manifest.json \
+            -D "${runtime_existing_dir}" >/dev/null 2>&1; then
+            existing_runtime_manifest="${runtime_existing_dir}/provider-runtime-manifest.json"
+          else
+            existing_runtime_manifest=""
+          fi
+
+          EXISTING_RUNTIME_MANIFEST="${existing_runtime_manifest}" \
+          RUNTIME_UPLOAD_DIR="${runtime_upload_dir}" \
           node <<'NODE'
           const fs = require('node:fs')
           const path = require('node:path')
@@ -869,16 +970,40 @@ jobs:
             return entries
           }
 
-          const runtimes = []
+          function runtimeKey(entry) {
+            return [
+              entry.provider,
+              entry.runtime,
+              entry.platform,
+              entry.arch,
+            ].join('|')
+          }
+
+          const byKey = new Map()
+          const existingManifestPath = process.env.EXISTING_RUNTIME_MANIFEST
+          if (existingManifestPath && fs.existsSync(existingManifestPath)) {
+            const existing = JSON.parse(fs.readFileSync(existingManifestPath, 'utf8'))
+            if (Array.isArray(existing.runtimes)) {
+              for (const entry of existing.runtimes) byKey.set(runtimeKey(entry), entry)
+            }
+          }
+
+          const newEntries = []
           for (const file of walk('release-assets')) {
             if (!/^provider-runtime-manifest-.+\.json$/.test(path.basename(file))) continue
             const manifest = JSON.parse(fs.readFileSync(file, 'utf8'))
-            if (Array.isArray(manifest.runtimes)) runtimes.push(...manifest.runtimes)
+            if (Array.isArray(manifest.runtimes)) newEntries.push(...manifest.runtimes)
           }
 
-          if (runtimes.length > 0) {
+          const uploadDir = process.env.RUNTIME_UPLOAD_DIR
+          if (newEntries.length > 0) {
+            for (const entry of newEntries) byKey.set(runtimeKey(entry), entry)
+            const runtimes = [...byKey.values()].sort((left, right) => (
+              runtimeKey(left).localeCompare(runtimeKey(right))
+            ))
+            fs.mkdirSync(uploadDir, { recursive: true })
             fs.writeFileSync(
-              'release-upload/provider-runtime-manifest.json',
+              path.join(uploadDir, 'provider-runtime-manifest.json'),
               JSON.stringify(
                 {
                   version: process.env.VERSION,
@@ -889,8 +1014,41 @@ jobs:
                 2,
               ) + '\n',
             )
+
+            for (const file of walk('release-assets')) {
+              if (!/^OpenTurtle\.OS-runtime-.+\.tar\.gz$/.test(path.basename(file))) continue
+              fs.copyFileSync(file, path.join(uploadDir, path.basename(file)))
+            }
           }
           NODE
+
+          if compgen -G "${runtime_upload_dir}/*" > /dev/null; then
+            runtime_notes_file="runtime-release-notes.md"
+            {
+              echo "OpenTurtle provider runtime channel"
+              echo
+              echo "This release stores reusable Claude/Codex ACP runtime artifacts."
+              echo "Desktop app releases read provider-runtime-manifest.json from this channel."
+            } > "${runtime_notes_file}"
+
+            if gh release view "${PROVIDER_RUNTIME_RELEASE_TAG}" --repo "${RELEASE_REPOSITORY}" >/dev/null 2>&1; then
+              gh release edit "${PROVIDER_RUNTIME_RELEASE_TAG}" \
+                --repo "${RELEASE_REPOSITORY}" \
+                --title "OpenTurtle Provider Runtimes" \
+                --notes-file "${runtime_notes_file}"
+            else
+              gh release create "${PROVIDER_RUNTIME_RELEASE_TAG}" \
+                --repo "${RELEASE_REPOSITORY}" \
+                --title "OpenTurtle Provider Runtimes" \
+                --notes-file "${runtime_notes_file}" \
+                --target "main"
+            fi
+
+            ls -lh "${runtime_upload_dir}"
+            gh release upload "${PROVIDER_RUNTIME_RELEASE_TAG}" "${runtime_upload_dir}"/* --repo "${RELEASE_REPOSITORY}" --clobber
+          else
+            echo "No provider runtime changes; keeping ${PROVIDER_RUNTIME_RELEASE_TAG} unchanged."
+          fi
 
           ls -lh release-upload
           gh release upload "${TAG}" release-upload/* --repo "${RELEASE_REPOSITORY}" --clobber
