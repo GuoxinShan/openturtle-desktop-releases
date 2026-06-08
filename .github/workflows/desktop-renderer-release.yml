@@ -339,10 +339,7 @@ jobs:
 
           manifest_tmp="${RUNNER_TEMP}/renderer-update.json"
           zip_tmp="${RUNNER_TEMP}/renderer-update.zip"
-          curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/octet-stream" \
-            "${manifest_url}" \
-            -o "${manifest_tmp}"
+          curl -fsSL "${manifest_url}" -o "${manifest_tmp}"
           zip_url="$(node -e "const fs=require('node:fs'); console.log(JSON.parse(fs.readFileSync(process.argv[1], 'utf8')).url)" "${manifest_tmp}")"
           curl -fsSL "${zip_url}" -o "${zip_tmp}"
           actual_sha256="$(shasum -a 256 "${zip_tmp}" | awk '{print $1}')"
