@@ -19,7 +19,7 @@ on:
       source_ref:
         description: Branch of the private source repo to build from
         required: true
-        default: main
+        default: feature/monorepo
         type: string
       bump:
         description: Version bump to apply when exact_version is empty
@@ -149,7 +149,7 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         uses: actions/checkout@v4
         with:
-          repository: aka-danielZhang/openturtle
+          repository: aka-danielZhang/openturtle-os
           ref: ${{ inputs.source_ref }}
           token: ${{ secrets.SOURCE_REPO_TOKEN }}
           fetch-depth: 0
@@ -180,7 +180,7 @@ jobs:
           else
             # Manual dispatch: bump the version in the private source repo,
             # commit and tag it, then build that tag.
-            cd apps/desktop
+            cd packages/frontend/apps/desktop
             if [ -n "${{ inputs.exact_version }}" ]; then
               raw_version="$(npm version "${{ inputs.exact_version }}" --no-git-tag-version)"
             elif [ "${{ inputs.bump }}" = "prerelease" ]; then
@@ -198,7 +198,7 @@ jobs:
               exit 1
             fi
 
-            git add apps/desktop/package.json
+            git add packages/frontend/apps/desktop/package.json
             git commit -m "chore(desktop): release ${tag}"
             git tag "${tag}"
             git push origin "HEAD:${{ inputs.source_ref }}"
@@ -250,7 +250,7 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v4
         with:
-          repository: aka-danielZhang/openturtle
+          repository: aka-danielZhang/openturtle-os
           ref: ${{ needs.prepare.outputs.build_ref }}
           token: ${{ secrets.SOURCE_REPO_TOKEN }}
           fetch-depth: 1
@@ -265,7 +265,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cd apps/desktop
+          cd packages/frontend/apps/desktop
           npm version "${{ needs.prepare.outputs.version }}" --no-git-tag-version --allow-same-version
 
       - name: Setup pnpm with Corepack
@@ -418,14 +418,14 @@ jobs:
         run: |
           set -euo pipefail
 
-          update_dir="apps/desktop/out/renderer-update"
+          update_dir="packages/frontend/apps/desktop/out/renderer-update"
           zip_name="OpenTurtle.OS-renderer-${VERSION}.zip"
           manifest_path="${update_dir}/renderer-update.json"
           versioned_manifest_path="${update_dir}/OpenTurtle.OS-renderer-${VERSION}.json"
           mkdir -p "${update_dir}"
           rm -f "${update_dir}/${zip_name}" "${manifest_path}" "${versioned_manifest_path}"
 
-          (cd apps/desktop/dist/renderer && zip -qry "../../out/renderer-update/${zip_name}" .)
+          (cd packages/frontend/apps/desktop/dist/renderer && zip -qry "../../out/renderer-update/${zip_name}" .)
           sha256="$(shasum -a 256 "${update_dir}/${zip_name}" | awk '{print $1}')"
           size="$(wc -c < "${update_dir}/${zip_name}" | tr -d ' ')"
 
@@ -456,7 +456,7 @@ jobs:
       - name: Make Windows desktop artifacts
         if: runner.os == 'Windows'
         shell: pwsh
-        working-directory: apps/desktop
+        working-directory: packages/frontend/apps/desktop
         run: |
           $ErrorActionPreference = 'Stop'
           pnpm exec electron-builder --win nsis --x64 --publish never --config electron-builder.config.cjs
@@ -479,7 +479,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          app_path="apps/desktop/out/builder/${{ matrix.mac_app_dir }}/OpenTurtle OS.app"
+          app_path="packages/frontend/apps/desktop/out/builder/${{ matrix.mac_app_dir }}/OpenTurtle OS.app"
 
           if [ ! -d "${app_path}" ]; then
             echo "Packaged macOS app not found: ${app_path}" >&2
@@ -511,7 +511,7 @@ jobs:
 
           version="${{ needs.prepare.outputs.version }}"
           arch="${{ matrix.arch }}"
-          out_dir="apps/desktop/out/builder"
+          out_dir="packages/frontend/apps/desktop/out/builder"
           expected_artifacts=(
             "${out_dir}/OpenTurtle.OS-darwin-${arch}-${version}.zip"
             "${out_dir}/OpenTurtle.OS-darwin-${arch}-${version}.zip.blockmap"
@@ -538,13 +538,13 @@ jobs:
 
       - name: Smoke test packaged app (Windows)
         if: runner.os == 'Windows'
-        working-directory: apps/desktop
+        working-directory: packages/frontend/apps/desktop
         run: pnpm smoke:packaged
 
       - name: Smoke test packaged app (macOS)
         if: runner.os == 'macOS'
         env:
-          OPENTURTLE_PACKAGED_EXE: apps/desktop/out/builder/${{ matrix.mac_app_dir }}/OpenTurtle OS.app/Contents/MacOS/OpenTurtle OS
+          OPENTURTLE_PACKAGED_EXE: packages/frontend/apps/desktop/out/builder/${{ matrix.mac_app_dir }}/OpenTurtle OS.app/Contents/MacOS/OpenTurtle OS
         run: pnpm --filter @openturtle/desktop smoke:packaged
 
       - name: Upload desktop artifacts
@@ -552,17 +552,17 @@ jobs:
         with:
           name: desktop-${{ matrix.label }}-${{ needs.prepare.outputs.tag }}
           path: |
-            apps/desktop/out/builder/*.dmg
-            apps/desktop/out/builder/*.zip
-            apps/desktop/out/builder/*.exe
-            apps/desktop/out/builder/*.yml
-            apps/desktop/out/builder/*.blockmap
-            apps/desktop/out/builder/mac*/*.dmg
-            apps/desktop/out/builder/mac*/*.zip
-            apps/desktop/out/renderer-update/*.zip
-            apps/desktop/out/renderer-update/*.json
-            apps/desktop/out/provider-runtimes/*
-            apps/desktop/assets/icon.ico
+            packages/frontend/apps/desktop/out/builder/*.dmg
+            packages/frontend/apps/desktop/out/builder/*.zip
+            packages/frontend/apps/desktop/out/builder/*.exe
+            packages/frontend/apps/desktop/out/builder/*.yml
+            packages/frontend/apps/desktop/out/builder/*.blockmap
+            packages/frontend/apps/desktop/out/builder/mac*/*.dmg
+            packages/frontend/apps/desktop/out/builder/mac*/*.zip
+            packages/frontend/apps/desktop/out/renderer-update/*.zip
+            packages/frontend/apps/desktop/out/renderer-update/*.json
+            packages/frontend/apps/desktop/out/provider-runtimes/*
+            packages/frontend/apps/desktop/assets/icon.ico
           if-no-files-found: error
 
   publish:

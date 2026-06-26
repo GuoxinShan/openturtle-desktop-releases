@@ -10,7 +10,7 @@ on:
       source_ref:
         description: Private source branch, tag, or SHA to build
         required: true
-        default: main
+        default: feature/monorepo
         type: string
       base_ref:
         description: Private source ref used for renderer-only diff validation
@@ -27,7 +27,7 @@ on:
         default: latest
         type: string
       min_shell_version:
-        description: Minimum desktop shell version; empty uses apps/desktop/package.json
+        description: Minimum desktop shell version; empty uses packages/frontend/apps/desktop/package.json
         required: false
         type: string
       max_shell_version:
@@ -59,7 +59,7 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v4
         with:
-          repository: aka-danielZhang/openturtle
+          repository: aka-danielZhang/openturtle-os
           ref: ${{ inputs.source_ref }}
           token: ${{ secrets.SOURCE_REPO_TOKEN }}
           fetch-depth: 0
@@ -121,7 +121,7 @@ jobs:
 
           min_shell_version="${MIN_SHELL_VERSION_INPUT}"
           if [ -z "${min_shell_version}" ]; then
-            min_shell_version="$(node -p "require('./apps/desktop/package.json').version")"
+            min_shell_version="$(node -p "require('./packages/frontend/apps/desktop/package.json').version")"
           fi
 
           renderer_version="${RENDERER_VERSION_INPUT}"
@@ -236,7 +236,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          update_dir="apps/desktop/out/renderer-update"
+          update_dir="packages/frontend/apps/desktop/out/renderer-update"
           zip_name="OpenTurtle.OS-renderer-${VERSION}.zip"
           zip_path="${update_dir}/${zip_name}"
           manifest_path="${update_dir}/renderer-update.json"
@@ -245,7 +245,7 @@ jobs:
           mkdir -p "${update_dir}"
           rm -f "${update_dir}"/OpenTurtle.OS-renderer-*.zip "${update_dir}"/OpenTurtle.OS-renderer-*.json "${manifest_path}"
 
-          (cd apps/desktop/dist/renderer && zip -qry "../../out/renderer-update/${zip_name}" .)
+          (cd packages/frontend/apps/desktop/dist/renderer && zip -qry "../../out/renderer-update/${zip_name}" .)
           sha256="$(shasum -a 256 "${zip_path}" | awk '{print $1}')"
           size="$(wc -c < "${zip_path}" | tr -d ' ')"
           created_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
