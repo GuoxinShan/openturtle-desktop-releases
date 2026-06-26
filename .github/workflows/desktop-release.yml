@@ -451,7 +451,7 @@ jobs:
           RUNTIME_ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
-          node scripts/package-provider-runtimes.mjs
+          node packages/frontend/scripts/package-provider-runtimes.mjs
 
       - name: Make Windows desktop artifacts
         if: runner.os == 'Windows'

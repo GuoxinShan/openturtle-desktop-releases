@@ -215,7 +215,7 @@ jobs:
             export CHANGED_FILES="${CHANGED_FILES_INPUT}"
           fi
 
-          node scripts/desktop-update-router.mjs | tee "${RUNNER_TEMP}/desktop-update-router.json"
+          node packages/frontend/scripts/desktop-update-router.mjs | tee "${RUNNER_TEMP}/desktop-update-router.json"
           mode="$(node -e "const fs=require('node:fs'); console.log(JSON.parse(fs.readFileSync(process.argv[1], 'utf8')).mode)" "${RUNNER_TEMP}/desktop-update-router.json")"
           if [ "${mode}" != "renderer" ]; then
             echo "desktop-update-router selected mode=${mode}; renderer-only release is blocked." >&2
