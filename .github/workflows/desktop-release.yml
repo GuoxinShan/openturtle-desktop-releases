@@ -77,6 +77,9 @@ concurrency:
   group: desktop-release
   cancel-in-progress: false
 
+defaults:
+  run:
+    working-directory: packages/frontend
 jobs:
   prepare:
     name: Resolve version
@@ -180,23 +183,25 @@ jobs:
           else
             # Manual dispatch: bump the version in the private source repo,
             # commit and tag it, then build that tag.
+            cd apps/desktop
             if [ -n "${{ inputs.exact_version }}" ]; then
-              raw_version="$(cd packages/frontend/apps/desktop && npm version "${{ inputs.exact_version }}" --no-git-tag-version)"
+              raw_version="$(npm version "${{ inputs.exact_version }}" --no-git-tag-version)"
             elif [ "${{ inputs.bump }}" = "prerelease" ]; then
-              raw_version="$(cd packages/frontend/apps/desktop && npm version prerelease --preid "${{ inputs.preid }}" --no-git-tag-version)"
+              raw_version="$(npm version prerelease --preid "${{ inputs.preid }}" --no-git-tag-version)"
             else
-              raw_version="$(cd packages/frontend/apps/desktop && npm version "${{ inputs.bump }}" --no-git-tag-version)"
+              raw_version="$(npm version "${{ inputs.bump }}" --no-git-tag-version)"
             fi
 
             version="${raw_version#v}"
-            tag="v${version}"}
+            tag="v${version}"
+            cd ../..
 
             if git rev-parse "${tag}" >/dev/null 2>&1; then
               echo "Tag ${tag} already exists in source repository" >&2
               exit 1
             fi
 
-            git add packages/frontend/apps/desktop/package.json
+            git add apps/desktop/package.json
             git commit -m "chore(desktop): release ${tag}"
             git tag "${tag}"
             git push origin "HEAD:${{ inputs.source_ref }}"
@@ -263,7 +268,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cd packages/frontend/apps/desktop
+          cd apps/desktop
           npm version "${{ needs.prepare.outputs.version }}" --no-git-tag-version --allow-same-version
 
       - name: Setup pnpm with Corepack
@@ -281,8 +286,8 @@ jobs:
         id: pnpm-store-cache
         uses: actions/cache/restore@v4
         with:
-          path: .pnpm-store
-          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
+          path: packages/frontend/.pnpm-store
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('packages/frontend/pnpm-lock.yaml') }}
           restore-keys: |
             ${{ runner.os }}-pnpm-store-
 
@@ -293,7 +298,7 @@ jobs:
             ~/.cache/electron
             ~/Library/Caches/electron
             ~/AppData/Local/electron/Cache
-          key: ${{ runner.os }}-electron-${{ matrix.arch }}-${{ hashFiles('pnpm-lock.yaml') }}
+          key: ${{ runner.os }}-electron-${{ matrix.arch }}-${{ hashFiles('packages/frontend/pnpm-lock.yaml') }}
           restore-keys: |
             ${{ runner.os }}-electron-${{ matrix.arch }}-
             ${{ runner.os }}-electron-
@@ -306,7 +311,7 @@ jobs:
             ~/Library/Caches/electron-builder
             ~/AppData/Local/electron-builder
             ~/AppData/Local/electron-builder/Cache
-          key: ${{ runner.os }}-electron-builder-${{ matrix.arch }}-${{ hashFiles('pnpm-lock.yaml') }}
+          key: ${{ runner.os }}-electron-builder-${{ matrix.arch }}-${{ hashFiles('packages/frontend/pnpm-lock.yaml') }}
           restore-keys: |
             ${{ runner.os }}-electron-builder-${{ matrix.arch }}-
             ${{ runner.os }}-electron-builder-
@@ -396,12 +401,12 @@ jobs:
         if: ${{ steps.pnpm-store-cache.outputs.cache-hit != 'true' && (matrix.label == 'windows-x64' || matrix.label == 'macos-arm64') }}
         uses: actions/cache/save@v4
         with:
-          path: .pnpm-store
+          path: packages/frontend/.pnpm-store
           key: ${{ steps.pnpm-store-cache.outputs.cache-primary-key }}
 
       - name: Guard desktop auto-update quit path
         if: matrix.label == 'windows-x64'
-        run: pnpm --filter openturtle test:desktop-update-guard
+        run: pnpm test:desktop-update-guard
 
       - name: Build desktop
         run: pnpm --filter @openturtle/desktop build
@@ -416,14 +421,14 @@ jobs:
         run: |
           set -euo pipefail
 
-          update_dir="packages/frontend/apps/desktop/out/renderer-update"
+          update_dir="apps/desktop/out/renderer-update"
           zip_name="OpenTurtle.OS-renderer-${VERSION}.zip"
           manifest_path="${update_dir}/renderer-update.json"
           versioned_manifest_path="${update_dir}/OpenTurtle.OS-renderer-${VERSION}.json"
           mkdir -p "${update_dir}"
           rm -f "${update_dir}/${zip_name}" "${manifest_path}" "${versioned_manifest_path}"
 
-          (cd packages/frontend/apps/desktop/dist/renderer && zip -qry "../../out/renderer-update/${zip_name}" .)
+          (cd apps/desktop/dist/renderer && zip -qry "../../out/renderer-update/${zip_name}" .)
           sha256="$(shasum -a 256 "${update_dir}/${zip_name}" | awk '{print $1}')"
           size="$(wc -c < "${update_dir}/${zip_name}" | tr -d ' ')"
 
@@ -449,7 +454,7 @@ jobs:
           RUNTIME_ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
-          node packages/frontend/scripts/package-provider-runtimes.mjs
+          node scripts/package-provider-runtimes.mjs
 
       - name: Make Windows desktop artifacts
         if: runner.os == 'Windows'
@@ -477,7 +482,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          app_path="packages/frontend/apps/desktop/out/builder/${{ matrix.mac_app_dir }}/OpenTurtle OS.app"
+          app_path="apps/desktop/out/builder/${{ matrix.mac_app_dir }}/OpenTurtle OS.app"
 
           if [ ! -d "${app_path}" ]; then
             echo "Packaged macOS app not found: ${app_path}" >&2
@@ -509,7 +514,7 @@ jobs:
 
           version="${{ needs.prepare.outputs.version }}"
           arch="${{ matrix.arch }}"
-          out_dir="packages/frontend/apps/desktop/out/builder"
+          out_dir="apps/desktop/out/builder"
           expected_artifacts=(
             "${out_dir}/OpenTurtle.OS-darwin-${arch}-${version}.zip"
             "${out_dir}/OpenTurtle.OS-darwin-${arch}-${version}.zip.blockmap"
@@ -542,7 +547,7 @@ jobs:
       - name: Smoke test packaged app (macOS)
         if: runner.os == 'macOS'
         env:
-          OPENTURTLE_PACKAGED_EXE: packages/frontend/apps/desktop/out/builder/${{ matrix.mac_app_dir }}/OpenTurtle OS.app/Contents/MacOS/OpenTurtle OS
+          OPENTURTLE_PACKAGED_EXE: apps/desktop/out/builder/${{ matrix.mac_app_dir }}/OpenTurtle OS.app/Contents/MacOS/OpenTurtle OS
         run: pnpm --filter @openturtle/desktop smoke:packaged
 
       - name: Upload desktop artifacts
@@ -550,17 +555,17 @@ jobs:
         with:
           name: desktop-${{ matrix.label }}-${{ needs.prepare.outputs.tag }}
           path: |
-            packages/frontend/apps/desktop/out/builder/*.dmg
-            packages/frontend/apps/desktop/out/builder/*.zip
-            packages/frontend/apps/desktop/out/builder/*.exe
-            packages/frontend/apps/desktop/out/builder/*.yml
-            packages/frontend/apps/desktop/out/builder/*.blockmap
-            packages/frontend/apps/desktop/out/builder/mac*/*.dmg
-            packages/frontend/apps/desktop/out/builder/mac*/*.zip
-            packages/frontend/apps/desktop/out/renderer-update/*.zip
-            packages/frontend/apps/desktop/out/renderer-update/*.json
-            packages/frontend/apps/desktop/out/provider-runtimes/*
-            packages/frontend/apps/desktop/assets/icon.ico
+            apps/desktop/out/builder/*.dmg
+            apps/desktop/out/builder/*.zip
+            apps/desktop/out/builder/*.exe
+            apps/desktop/out/builder/*.yml
+            apps/desktop/out/builder/*.blockmap
+            apps/desktop/out/builder/mac*/*.dmg
+            apps/desktop/out/builder/mac*/*.zip
+            apps/desktop/out/renderer-update/*.zip
+            apps/desktop/out/renderer-update/*.json
+            apps/desktop/out/provider-runtimes/*
+            apps/desktop/assets/icon.ico
           if-no-files-found: error
 
   publish:

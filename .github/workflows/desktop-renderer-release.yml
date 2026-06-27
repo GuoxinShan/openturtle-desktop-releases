@@ -27,7 +27,7 @@ on:
         default: latest
         type: string
       min_shell_version:
-        description: Minimum desktop shell version; empty uses packages/frontend/apps/desktop/package.json
+        description: Minimum desktop shell version; empty uses apps/desktop/package.json
         required: false
         type: string
       max_shell_version:
@@ -49,6 +49,9 @@ concurrency:
   group: desktop-renderer-release
   cancel-in-progress: false
 
+defaults:
+  run:
+    working-directory: packages/frontend
 jobs:
   publish-renderer:
     name: Publish renderer update
@@ -82,8 +85,8 @@ jobs:
       - name: Restore pnpm store cache
         uses: actions/cache@v4
         with:
-          path: .pnpm-store
-          key: ${{ runner.os }}-pnpm-store-renderer-${{ hashFiles('pnpm-lock.yaml') }}
+          path: packages/frontend/.pnpm-store
+          key: ${{ runner.os }}-pnpm-store-renderer-${{ hashFiles('packages/frontend/pnpm-lock.yaml') }}
           restore-keys: |
             ${{ runner.os }}-pnpm-store-renderer-
             ${{ runner.os }}-pnpm-store-
@@ -121,7 +124,7 @@ jobs:
 
           min_shell_version="${MIN_SHELL_VERSION_INPUT}"
           if [ -z "${min_shell_version}" ]; then
-            min_shell_version="$(node -p "require('./packages/frontend/apps/desktop/package.json').version")"
+            min_shell_version="$(node -p "require('./apps/desktop/package.json').version")"
           fi
 
           renderer_version="${RENDERER_VERSION_INPUT}"
@@ -215,7 +218,7 @@ jobs:
             export CHANGED_FILES="${CHANGED_FILES_INPUT}"
           fi
 
-          node packages/frontend/scripts/desktop-update-router.mjs | tee "${RUNNER_TEMP}/desktop-update-router.json"
+          node scripts/desktop-update-router.mjs | tee "${RUNNER_TEMP}/desktop-update-router.json"
           mode="$(node -e "const fs=require('node:fs'); console.log(JSON.parse(fs.readFileSync(process.argv[1], 'utf8')).mode)" "${RUNNER_TEMP}/desktop-update-router.json")"
           if [ "${mode}" != "renderer" ]; then
             echo "desktop-update-router selected mode=${mode}; renderer-only release is blocked." >&2
@@ -236,7 +239,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          update_dir="packages/frontend/apps/desktop/out/renderer-update"
+          update_dir="apps/desktop/out/renderer-update"
           zip_name="OpenTurtle.OS-renderer-${VERSION}.zip"
           zip_path="${update_dir}/${zip_name}"
           manifest_path="${update_dir}/renderer-update.json"
@@ -245,7 +248,7 @@ jobs:
           mkdir -p "${update_dir}"
           rm -f "${update_dir}"/OpenTurtle.OS-renderer-*.zip "${update_dir}"/OpenTurtle.OS-renderer-*.json "${manifest_path}"
 
-          (cd packages/frontend/apps/desktop/dist/renderer && zip -qry "../../out/renderer-update/${zip_name}" .)
+          (cd apps/desktop/dist/renderer && zip -qry "../../out/renderer-update/${zip_name}" .)
           sha256="$(shasum -a 256 "${zip_path}" | awk '{print $1}')"
           size="$(wc -c < "${zip_path}" | tr -d ' ')"
           created_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
