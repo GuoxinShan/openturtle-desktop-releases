@@ -557,16 +557,16 @@ jobs:
         with:
           name: desktop-${{ matrix.label }}-${{ needs.prepare.outputs.tag }}
           path: |
-            apps/desktop/out/builder/*.dmg
-            apps/desktop/out/builder/*.zip
-            apps/desktop/out/builder/*.exe
-            apps/desktop/out/builder/*.yml
-            apps/desktop/out/builder/*.blockmap
-            apps/desktop/out/builder/mac*/*.dmg
-            apps/desktop/out/builder/mac*/*.zip
-            apps/desktop/out/renderer-update/*.zip
-            apps/desktop/out/renderer-update/*.json
-            apps/desktop/out/provider-runtimes/*
+            packages/frontend/apps/desktop/out/builder/*.dmg
+            packages/frontend/apps/desktop/out/builder/*.zip
+            packages/frontend/apps/desktop/out/builder/*.exe
+            packages/frontend/apps/desktop/out/builder/*.yml
+            packages/frontend/apps/desktop/out/builder/*.blockmap
+            packages/frontend/apps/desktop/out/builder/mac*/*.dmg
+            packages/frontend/apps/desktop/out/builder/mac*/*.zip
+            packages/frontend/apps/desktop/out/renderer-update/*.zip
+            packages/frontend/apps/desktop/out/renderer-update/*.json
+            packages/frontend/apps/desktop/out/provider-runtimes/*
             apps/desktop/assets/icon.ico
           if-no-files-found: error
 
