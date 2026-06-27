@@ -401,7 +401,7 @@ jobs:
 
       - name: Guard desktop auto-update quit path
         if: matrix.label == 'windows-x64'
-        run: pnpm test:desktop-update-guard
+        run: pnpm --filter openturtle test:desktop-update-guard
 
       - name: Build desktop
         run: pnpm --filter @openturtle/desktop build
