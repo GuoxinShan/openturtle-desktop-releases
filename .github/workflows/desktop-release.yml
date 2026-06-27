@@ -180,18 +180,16 @@ jobs:
           else
             # Manual dispatch: bump the version in the private source repo,
             # commit and tag it, then build that tag.
-            cd packages/frontend/apps/desktop
             if [ -n "${{ inputs.exact_version }}" ]; then
-              raw_version="$(npm version "${{ inputs.exact_version }}" --no-git-tag-version)"
+              raw_version="$(cd packages/frontend/apps/desktop && npm version "${{ inputs.exact_version }}" --no-git-tag-version)"
             elif [ "${{ inputs.bump }}" = "prerelease" ]; then
-              raw_version="$(npm version prerelease --preid "${{ inputs.preid }}" --no-git-tag-version)"
+              raw_version="$(cd packages/frontend/apps/desktop && npm version prerelease --preid "${{ inputs.preid }}" --no-git-tag-version)"
             else
-              raw_version="$(npm version "${{ inputs.bump }}" --no-git-tag-version)"
+              raw_version="$(cd packages/frontend/apps/desktop && npm version "${{ inputs.bump }}" --no-git-tag-version)"
             fi
 
             version="${raw_version#v}"
-            tag="v${version}"
-            cd ../..
+            tag="v${version}"}
 
             if git rev-parse "${tag}" >/dev/null 2>&1; then
               echo "Tag ${tag} already exists in source repository" >&2
