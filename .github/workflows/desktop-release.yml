@@ -576,6 +576,10 @@ jobs:
       - prepare
       - build
     runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: .
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       TAG: ${{ needs.prepare.outputs.tag }}
