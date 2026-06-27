@@ -103,6 +103,7 @@ jobs:
       - name: Resolve release mode
         id: mode
         shell: bash
+        working-directory: .
         run: |
           set -euo pipefail
           if [ "${{ github.event_name }}" = "push" ]; then
@@ -120,6 +121,7 @@ jobs:
 
       - name: Require macOS signing secrets
         shell: bash
+        working-directory: .
         run: |
           set -euo pipefail
 
