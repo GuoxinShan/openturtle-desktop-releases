@@ -228,11 +228,6 @@ jobs:
             forge_platform: win32
             arch: x64
             mac_app_dir: ''
-          - label: macos-x64
-            os: macos-15
-            forge_platform: darwin
-            arch: x64
-            mac_app_dir: mac
           - label: macos-arm64
             os: macos-15
             forge_platform: darwin
@@ -609,10 +604,8 @@ jobs:
             echo "- Windows x64: https://github.com/${RELEASE_REPOSITORY}/releases/download/${TAG}/OpenTurtleOSSetup.exe"
             if [ "${MAC_ARTIFACT_MODE}" = "installer" ]; then
               echo "- macOS Apple Silicon: https://github.com/${RELEASE_REPOSITORY}/releases/download/${TAG}/OpenTurtle.OS-darwin-arm64-${VERSION}.dmg"
-              echo "- macOS Intel: https://github.com/${RELEASE_REPOSITORY}/releases/download/${TAG}/OpenTurtle.OS-darwin-x64-${VERSION}.dmg"
             else
               echo "- macOS Apple Silicon update archive: https://github.com/${RELEASE_REPOSITORY}/releases/download/${TAG}/OpenTurtle.OS-darwin-arm64-${VERSION}.zip"
-              echo "- macOS Intel update archive: https://github.com/${RELEASE_REPOSITORY}/releases/download/${TAG}/OpenTurtle.OS-darwin-x64-${VERSION}.zip"
             fi
             echo
             echo "Attached ZIP, NUPKG, blockmap, and RELEASES files are update feed artifacts for the desktop auto-updater."
@@ -734,19 +727,15 @@ jobs:
           }
 
           const byUrl = new Map()
-          for (const arch of ['x64', 'arm64']) {
-            for (const entry of parseFeed(findFeed(arch))) {
-              byUrl.set(entry.url, entry)
-            }
+          for (const entry of parseFeed(findFeed('arm64'))) {
+            byUrl.set(entry.url, entry)
           }
 
           const orderedUrls = [
-            `OpenTurtle.OS-darwin-x64-${version}.zip`,
             `OpenTurtle.OS-darwin-arm64-${version}.zip`,
           ]
           if (process.env.MAC_ARTIFACT_MODE === 'installer') {
             orderedUrls.push(
-              `OpenTurtle.OS-darwin-x64-${version}.dmg`,
               `OpenTurtle.OS-darwin-arm64-${version}.dmg`,
             )
           }
