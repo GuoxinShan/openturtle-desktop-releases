@@ -234,6 +234,17 @@ jobs:
         working-directory: packages/frontend
         run: pnpm --filter @openturtle/desktop build
 
+      - name: Configure Windows signing environment
+        if: matrix.target.platform == 'win32' && needs.resolve-release.outputs.windows_signature_policy == 'require'
+        shell: bash
+        env:
+          WINDOWS_CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+          WINDOWS_CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          echo "CSC_LINK=${WINDOWS_CSC_LINK}" >> "${GITHUB_ENV}"
+          echo "CSC_KEY_PASSWORD=${WINDOWS_CSC_KEY_PASSWORD}" >> "${GITHUB_ENV}"
+
       - name: Build desktop package
         working-directory: packages/frontend/apps/desktop
         env:
@@ -242,8 +253,6 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD || secrets.APPLE_ID_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
         run: pnpm run ${{ matrix.target.make }}
 
       - name: Run packaged release gate
