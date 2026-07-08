@@ -456,67 +456,13 @@ jobs:
             ${{ steps.verify-provider-runtime-assets.outputs.manifest_path }}
             ${{ steps.verify-provider-runtime-assets.outputs.tar_path }}
 
-  audit-packaged-release-evidence:
-    needs:
-      - resolve-release
-      - package
-      - renderer-assets
-    if: needs.resolve-release.outputs.runtime_artifact_mode != 'force'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - name: Check out source
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.SOURCE_REPOSITORY }}
-          ref: ${{ env.SOURCE_REF }}
-          token: ${{ secrets.SOURCE_REPO_TOKEN || github.token }}
-          fetch-depth: 0
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-
-      - name: Install dependencies
-        run: |
-          corepack enable
-          pnpm --filter @openturtle/desktop... install --frozen-lockfile
-
-      - name: Download evidence artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: desktop-release-evidence-*
-          path: out/desktop-release-evidence
-          merge-multiple: true
-
-      - name: Audit downloaded evidence bundle
-        working-directory: packages/frontend
-        env:
-          OPENTURTLE_RELEASE_EVIDENCE_DIR: ${{ github.workspace }}/out/desktop-release-evidence
-          OPENTURTLE_RELEASE_EVIDENCE_BUNDLE_TARGETS: darwin:arm64:packaged,win32:x64:packaged
-          OPENTURTLE_RELEASE_REPOSITORY: ${{ needs.resolve-release.outputs.release_repository }}
-          OPENTURTLE_RELEASE_TAG: ${{ needs.resolve-release.outputs.release_tag }}
-          OPENTURTLE_RELEASE_SOURCE_REPOSITORY: ${{ env.SOURCE_REPOSITORY }}
-          OPENTURTLE_RELEASE_SOURCE_SHA: ${{ needs.resolve-release.outputs.source_sha }}
-          OPENTURTLE_RELEASE_WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          OPENTURTLE_RUNTIME_ARTIFACT_MODE: ${{ needs.resolve-release.outputs.runtime_artifact_mode }}
-        run: pnpm run verify:release-evidence:bundle
-
-      - name: Upload release evidence bundle
-        uses: actions/upload-artifact@v4
-        with:
-          name: desktop-release-evidence-bundle
-          if-no-files-found: error
-          path: out/desktop-release-evidence/release-evidence-bundle-*.json
-
-  audit-release-evidence-with-provider-runtime:
+  audit-release-evidence:
     needs:
       - resolve-release
       - package
       - renderer-assets
       - provider-runtime
-    if: needs.resolve-release.outputs.runtime_artifact_mode == 'force'
+    if: ${{ always() && needs.resolve-release.result == 'success' && needs.package.result == 'success' && needs.renderer-assets.result == 'success' && ((needs.resolve-release.outputs.runtime_artifact_mode == 'force' && needs.provider-runtime.result == 'success') || (needs.resolve-release.outputs.runtime_artifact_mode != 'force' && needs.provider-runtime.result == 'skipped')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -546,6 +492,7 @@ jobs:
           merge-multiple: true
 
       - name: Download provider runtime assets for evidence audit
+        if: needs.resolve-release.outputs.runtime_artifact_mode == 'force'
         uses: actions/download-artifact@v4
         with:
           pattern: desktop-release-provider-runtime-assets-*
@@ -556,7 +503,7 @@ jobs:
         working-directory: packages/frontend
         env:
           OPENTURTLE_RELEASE_EVIDENCE_DIR: ${{ github.workspace }}/out/desktop-release-evidence
-          OPENTURTLE_RELEASE_EVIDENCE_BUNDLE_TARGETS: darwin:arm64:packaged,win32:x64:packaged,darwin:arm64:provider-runtime
+          OPENTURTLE_RELEASE_EVIDENCE_BUNDLE_TARGETS: ${{ needs.resolve-release.outputs.runtime_artifact_mode == 'force' && 'darwin:arm64:packaged,win32:x64:packaged,darwin:arm64:provider-runtime' || 'darwin:arm64:packaged,win32:x64:packaged' }}
           OPENTURTLE_RELEASE_REPOSITORY: ${{ needs.resolve-release.outputs.release_repository }}
           OPENTURTLE_RELEASE_TAG: ${{ needs.resolve-release.outputs.release_tag }}
           OPENTURTLE_RELEASE_SOURCE_REPOSITORY: ${{ env.SOURCE_REPOSITORY }}
@@ -577,8 +524,7 @@ jobs:
       - resolve-release
       - package
       - renderer-assets
-      - audit-packaged-release-evidence
-    if: needs.resolve-release.outputs.runtime_artifact_mode != 'force'
+      - audit-release-evidence
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -720,10 +666,8 @@ jobs:
       - package
       - renderer-assets
       - provider-runtime
-      - audit-packaged-release-evidence
-      - audit-release-evidence-with-provider-runtime
+      - audit-release-evidence
       - publish-release
-      - publish-release-with-provider-runtime
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -758,10 +702,8 @@ jobs:
           JOB_RESULT_PACKAGE: ${{ needs.package.result }}
           JOB_RESULT_RENDERER_ASSETS: ${{ needs.renderer-assets.result }}
           JOB_RESULT_PROVIDER_RUNTIME: ${{ needs.provider-runtime.result }}
-          JOB_RESULT_AUDIT_PACKAGED_RELEASE_EVIDENCE: ${{ needs.audit-packaged-release-evidence.result }}
-          JOB_RESULT_AUDIT_RELEASE_EVIDENCE_WITH_PROVIDER_RUNTIME: ${{ needs.audit-release-evidence-with-provider-runtime.result }}
+          JOB_RESULT_AUDIT_RELEASE_EVIDENCE: ${{ needs.audit-release-evidence.result }}
           JOB_RESULT_PUBLISH_RELEASE: ${{ needs.publish-release.result }}
-          JOB_RESULT_PUBLISH_RELEASE_WITH_PROVIDER_RUNTIME: ${{ needs.publish-release-with-provider-runtime.result }}
         run: pnpm run verify:desktop-release-workflow-result
 
       - name: Upload release workflow result evidence
@@ -771,145 +713,3 @@ jobs:
           name: desktop-release-workflow-result
           if-no-files-found: warn
           path: packages/frontend/out/desktop-release-workflow/desktop-release-workflow-*.json
-
-  publish-release-with-provider-runtime:
-    needs:
-      - resolve-release
-      - package
-      - renderer-assets
-      - provider-runtime
-      - audit-release-evidence-with-provider-runtime
-    if: needs.resolve-release.outputs.runtime_artifact_mode == 'force'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - name: Check out source
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.SOURCE_REPOSITORY }}
-          ref: ${{ env.SOURCE_REF }}
-          token: ${{ secrets.SOURCE_REPO_TOKEN || github.token }}
-          fetch-depth: 0
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-
-      - name: Enable Corepack
-        run: corepack enable
-
-      - name: Download packaged and renderer assets
-        uses: actions/download-artifact@v4
-        with:
-          pattern: desktop-release-assets-*
-          path: out/desktop-release-assets
-          merge-multiple: true
-
-      - name: Download release evidence bundle
-        uses: actions/download-artifact@v4
-        with:
-          name: desktop-release-evidence-bundle
-          path: out/desktop-release-evidence-bundle
-
-      - name: Audit release asset set
-        run: node packages/frontend/scripts/verify-desktop-release-assets.mjs out/desktop-release-assets out/desktop-release-assets-upload.txt
-
-      - name: Ensure public release exists
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_REPOSITORY_TOKEN || github.token }}
-          RELEASE_REPOSITORY: ${{ needs.resolve-release.outputs.release_repository }}
-          RELEASE_TAG: ${{ needs.resolve-release.outputs.release_tag }}
-          RELEASE_TARGET_SHA: ${{ needs.resolve-release.outputs.source_sha }}
-          RELEASE_SOURCE_REPOSITORY: ${{ env.SOURCE_REPOSITORY }}
-          RELEASE_CROSS_REPOSITORY: ${{ needs.resolve-release.outputs.cross_repository_release }}
-          RELEASE_WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          if [ -z "${GH_TOKEN:-}" ]; then
-            echo "RELEASE_REPOSITORY_TOKEN is required to create the desktop release" >&2
-            exit 1
-          fi
-          source_marker="Source: ${RELEASE_SOURCE_REPOSITORY}@${RELEASE_TARGET_SHA}"
-          run_marker="Run: ${RELEASE_WORKFLOW_RUN_URL}"
-          if ! gh release view "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" >/dev/null 2>&1; then
-            release_notes="OpenTurtle OS desktop release $RELEASE_TAG"$'\n'"${source_marker}"$'\n'"${run_marker}"
-            create_args=(
-              "$RELEASE_TAG"
-              --repo "$RELEASE_REPOSITORY"
-              --title "$RELEASE_TAG"
-              --notes "$release_notes"
-            )
-            if [ "$RELEASE_CROSS_REPOSITORY" != "true" ]; then
-              create_args+=(--target "$RELEASE_TARGET_SHA")
-            fi
-            gh release create "${create_args[@]}"
-          else
-            release_body="$(gh release view "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" --json body -q .body)"
-            if [[ "$release_body" != *"$source_marker"* ]]; then
-              echo "Release $RELEASE_TAG in $RELEASE_REPOSITORY does not match source marker: $source_marker" >&2
-              exit 1
-            fi
-            if [[ "$release_body" != *"$run_marker"* ]]; then
-              echo "Release $RELEASE_TAG in $RELEASE_REPOSITORY does not match workflow run marker: $run_marker" >&2
-              exit 1
-            fi
-          fi
-
-      - name: Upload release assets
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_REPOSITORY_TOKEN || github.token }}
-          RELEASE_REPOSITORY: ${{ needs.resolve-release.outputs.release_repository }}
-          RELEASE_TAG: ${{ needs.resolve-release.outputs.release_tag }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -z "${GH_TOKEN:-}" ]; then
-            echo "RELEASE_REPOSITORY_TOKEN is required to upload desktop release assets" >&2
-            exit 1
-          fi
-          mapfile -t files < out/desktop-release-assets-upload.txt
-          if [ "${#files[@]}" -eq 0 ]; then
-            echo "No release assets were downloaded" >&2
-            exit 1
-          fi
-          mapfile -t evidence_files < <(find out/desktop-release-evidence-bundle -type f -name 'release-evidence-bundle-*.json' | sort)
-          if [ "${#evidence_files[@]}" -ne 1 ]; then
-            echo "Expected exactly one release evidence bundle, found ${#evidence_files[@]}" >&2
-            printf '%s\n' "${evidence_files[@]}" >&2
-            exit 1
-          fi
-          mapfile -t stale_evidence_assets < <(
-            gh release view "$RELEASE_TAG" \
-              --repo "$RELEASE_REPOSITORY" \
-              --json assets \
-              --jq '.assets[].name | select(test("^release-evidence-bundle-.*\\.json$"))' || true
-          )
-          for stale_asset in "${stale_evidence_assets[@]}"; do
-            gh release delete-asset "$RELEASE_TAG" "$stale_asset" \
-              --repo "$RELEASE_REPOSITORY" \
-              -y
-          done
-          files+=("${evidence_files[@]}")
-          gh release upload "$RELEASE_TAG" "${files[@]}" \
-            --repo "$RELEASE_REPOSITORY" \
-            --clobber
-
-      - name: Verify public release assets
-        working-directory: packages/frontend
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_REPOSITORY_TOKEN || github.token }}
-          RELEASE_REPOSITORY: ${{ needs.resolve-release.outputs.release_repository }}
-          RELEASE_TAG: ${{ needs.resolve-release.outputs.release_tag }}
-          RELEASE_TARGET_SHA: ${{ needs.resolve-release.outputs.source_sha }}
-          RELEASE_SOURCE_REPOSITORY: ${{ env.SOURCE_REPOSITORY }}
-          RELEASE_WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          RUNTIME_ARTIFACT_MODE: ${{ needs.resolve-release.outputs.runtime_artifact_mode }}
-        run: pnpm run verify:desktop-public-release -- ../../out/desktop-release-assets-upload.txt ../../out/desktop-release-evidence-bundle
-
-      - name: Upload public release verification evidence
-        uses: actions/upload-artifact@v4
-        with:
-          name: desktop-public-release-evidence
-          if-no-files-found: error
-          path: packages/frontend/out/desktop-public-release/desktop-public-release-*.json
