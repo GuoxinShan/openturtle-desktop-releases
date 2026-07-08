@@ -230,6 +230,10 @@ jobs:
             exit 1
           fi
 
+      - name: Build desktop app
+        working-directory: packages/frontend
+        run: pnpm --filter @openturtle/desktop build
+
       - name: Build desktop package
         working-directory: packages/frontend/apps/desktop
         env:
