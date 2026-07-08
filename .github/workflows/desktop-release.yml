@@ -678,6 +678,17 @@ jobs:
             printf '%s\n' "${evidence_files[@]}" >&2
             exit 1
           fi
+          mapfile -t stale_evidence_assets < <(
+            gh release view "$RELEASE_TAG" \
+              --repo "$RELEASE_REPOSITORY" \
+              --json assets \
+              --jq '.assets[].name | select(test("^release-evidence-bundle-.*\\.json$"))' || true
+          )
+          for stale_asset in "${stale_evidence_assets[@]}"; do
+            gh release delete-asset "$RELEASE_TAG" "$stale_asset" \
+              --repo "$RELEASE_REPOSITORY" \
+              -y
+          done
           files+=("${evidence_files[@]}")
           gh release upload "$RELEASE_TAG" "${files[@]}" \
             --repo "$RELEASE_REPOSITORY" \
@@ -868,6 +879,17 @@ jobs:
             printf '%s\n' "${evidence_files[@]}" >&2
             exit 1
           fi
+          mapfile -t stale_evidence_assets < <(
+            gh release view "$RELEASE_TAG" \
+              --repo "$RELEASE_REPOSITORY" \
+              --json assets \
+              --jq '.assets[].name | select(test("^release-evidence-bundle-.*\\.json$"))' || true
+          )
+          for stale_asset in "${stale_evidence_assets[@]}"; do
+            gh release delete-asset "$RELEASE_TAG" "$stale_asset" \
+              --repo "$RELEASE_REPOSITORY" \
+              -y
+          done
           files+=("${evidence_files[@]}")
           gh release upload "$RELEASE_TAG" "${files[@]}" \
             --repo "$RELEASE_REPOSITORY" \
