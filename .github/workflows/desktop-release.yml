@@ -1,14 +1,4 @@
-name: Desktop Release
-
-# This workflow runs in the PUBLIC release repo so GitHub Actions standard
-# runners (including macOS) are free. It checks out the PRIVATE desktop source
-# repo via SOURCE_REPO_TOKEN; source code stays private.
-#
-# Two ways to trigger:
-#   1. Push a tag `vX.Y.Z` to THIS repo  -> signed release, builds private main
-#      HEAD, version taken from the tag name. This is the normal release path.
-#   2. workflow_dispatch                 -> manual fallback; bumps the version
-#      in the private source repo and tags it, can build any branch.
+name: desktop-release
 
 on:
   push:
@@ -17,349 +7,201 @@ on:
   workflow_dispatch:
     inputs:
       source_ref:
-        description: Branch of the private source repo to build from
-        required: true
-        default: feature/monorepo
-        type: string
-      bump:
-        description: Version bump to apply when exact_version is empty
-        required: true
-        default: patch
-        type: choice
-        options:
-          - patch
-          - minor
-          - major
-          - prerelease
-      exact_version:
-        description: Exact semver version, for example 0.2.0
+        description: Source ref to build from
         required: false
-        type: string
-      preid:
-        description: Prerelease identifier used with bump=prerelease
+        default: main
+      source_repository:
+        description: Source repository to check out
+        required: true
+        default: aka-danielZhang/openturtle-os
+      release_repository:
+        description: Public release repository
+        required: true
+        default: GuoxinShan/openturtle-desktop-releases
+      release_tag:
+        description: Release tag. Defaults to the pushed tag or desktop package version.
         required: false
-        default: beta
-        type: string
-      prerelease:
-        description: Mark the public release as prerelease
-        required: true
-        default: false
-        type: boolean
-      draft:
-        description: Create the public release as draft
-        required: true
-        default: false
-        type: boolean
-      mac_artifact_mode:
-        description: "macOS artifacts to build: update skips DMG, installer includes DMG"
-        required: true
-        default: update
-        type: choice
-        options:
-          - update
-          - installer
+        default: ''
       runtime_artifact_mode:
-        description: "Provider runtime artifacts: auto reuses the runtime channel, force rebuilds, skip disables"
+        description: Provider runtime artifact mode
         required: true
-        default: auto
         type: choice
+        default: auto
         options:
           - auto
           - force
           - skip
+      windows_signature_policy:
+        description: Windows Authenticode signature policy
+        required: true
+        type: choice
+        default: skip
+        options:
+          - skip
+          - require
+
 permissions:
   contents: write
 
-env:
-  COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
-
 concurrency:
-  group: desktop-release
+  group: desktop-release-${{ github.ref_name }}
   cancel-in-progress: false
 
-defaults:
-  run:
-    working-directory: packages/frontend
+env:
+  SOURCE_REPOSITORY: ${{ inputs.source_repository || 'aka-danielZhang/openturtle-os' }}
+  SOURCE_REF: ${{ inputs.source_ref || (github.event_name == 'push' && 'main') || github.ref }}
+  RELEASE_REPOSITORY: ${{ inputs.release_repository || 'GuoxinShan/openturtle-desktop-releases' }}
+  RUNTIME_ARTIFACT_MODE: ${{ inputs.runtime_artifact_mode || 'auto' }}
+  WINDOWS_SIGNATURE_POLICY: ${{ inputs.windows_signature_policy || 'skip' }}
+
 jobs:
-  prepare:
-    name: Resolve version
-    runs-on: ubuntu-latest
-    env:
-      APPLE_SIGN_IDENTITY: ${{ secrets.APPLE_SIGN_IDENTITY }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-      APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
-      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+  resolve-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     outputs:
-      version: ${{ steps.version.outputs.version }}
-      tag: ${{ steps.version.outputs.tag }}
-      build_ref: ${{ steps.version.outputs.build_ref }}
-      prerelease: ${{ steps.mode.outputs.prerelease }}
-      draft: ${{ steps.mode.outputs.draft }}
-      mac_artifact_mode: ${{ steps.mode.outputs.mac_artifact_mode }}
-      runtime_artifact_mode: ${{ steps.mode.outputs.runtime_artifact_mode }}
+      release_tag: ${{ steps.release.outputs.release_tag }}
+      release_repository: ${{ steps.release.outputs.release_repository }}
+      runtime_artifact_mode: ${{ steps.release.outputs.runtime_artifact_mode }}
+      windows_signature_policy: ${{ steps.release.outputs.windows_signature_policy }}
+      source_sha: ${{ steps.release.outputs.source_sha }}
+      cross_repository_release: ${{ steps.release.outputs.cross_repository_release }}
     steps:
-      - name: Resolve release mode
-        id: mode
-        shell: bash
-        working-directory: .
-        run: |
-          set -euo pipefail
-          if [ "${{ github.event_name }}" = "push" ]; then
-            # Tag-triggered releases are always signed and final.
-            echo "prerelease=false" >> "${GITHUB_OUTPUT}"
-            echo "draft=false" >> "${GITHUB_OUTPUT}"
-            echo "mac_artifact_mode=update" >> "${GITHUB_OUTPUT}"
-            echo "runtime_artifact_mode=auto" >> "${GITHUB_OUTPUT}"
-          else
-            echo "prerelease=${{ inputs.prerelease }}" >> "${GITHUB_OUTPUT}"
-            echo "draft=${{ inputs.draft }}" >> "${GITHUB_OUTPUT}"
-            echo "mac_artifact_mode=${{ inputs.mac_artifact_mode }}" >> "${GITHUB_OUTPUT}"
-            echo "runtime_artifact_mode=${{ inputs.runtime_artifact_mode }}" >> "${GITHUB_OUTPUT}"
-          fi
-
-      - name: Require macOS signing secrets
-        shell: bash
-        working-directory: .
-        run: |
-          set -euo pipefail
-
-          missing=()
-          for name in \
-            APPLE_SIGN_IDENTITY \
-            APPLE_CERTIFICATE_BASE64 \
-            APPLE_CERTIFICATE_PASSWORD \
-            APPLE_ID \
-            APPLE_ID_PASSWORD \
-            APPLE_TEAM_ID
-          do
-            if [ -z "${!name:-}" ]; then
-              missing+=("${name}")
-            fi
-          done
-
-          if [ "${#missing[@]}" -gt 0 ]; then
-            echo "Missing required macOS signing secret(s): ${missing[*]}" >&2
-            echo "Configure Apple Developer ID signing and notarization secrets before publishing desktop releases." >&2
-            exit 1
-          fi
-
-          if [ "${APPLE_SIGN_IDENTITY}" = "-" ]; then
-            echo "APPLE_SIGN_IDENTITY must be a Developer ID signing identity, not '-'." >&2
-            exit 1
-          fi
-
-      - name: Checkout source
-        if: github.event_name == 'workflow_dispatch'
+      - name: Check out source
         uses: actions/checkout@v4
         with:
-          repository: aka-danielZhang/openturtle-os
-          ref: ${{ inputs.source_ref }}
-          token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ env.SOURCE_REF }}
+          token: ${{ secrets.SOURCE_REPO_TOKEN || github.token }}
           fetch-depth: 0
 
-      - name: Setup Node.js
-        if: github.event_name == 'workflow_dispatch'
+      - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 24
 
-      - name: Configure git
-        if: github.event_name == 'workflow_dispatch'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-      - name: Resolve version and tag
-        id: version
+      - name: Resolve release inputs
+        id: release
         shell: bash
+        env:
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
-
-          if [ "${{ github.event_name }}" = "push" ]; then
-            # Version comes from the tag pushed to this repo.
-            tag="${{ github.ref_name }}"
-            version="${tag#v}"
-            build_ref="main"
-          else
-            # Manual dispatch: bump the version in the private source repo,
-            # commit and tag it, then build that tag.
-            cd apps/desktop
-            if [ -n "${{ inputs.exact_version }}" ]; then
-              raw_version="$(npm version "${{ inputs.exact_version }}" --no-git-tag-version)"
-            elif [ "${{ inputs.bump }}" = "prerelease" ]; then
-              raw_version="$(npm version prerelease --preid "${{ inputs.preid }}" --no-git-tag-version)"
+          package_version="$(node -p "require('./packages/frontend/apps/desktop/package.json').version")"
+          release_tag="${INPUT_RELEASE_TAG:-}"
+          if [ -z "$release_tag" ]; then
+            if [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
+              release_tag="${GITHUB_REF_NAME}"
             else
-              raw_version="$(npm version "${{ inputs.bump }}" --no-git-tag-version)"
+              release_tag="v${package_version}"
             fi
-
-            version="${raw_version#v}"
-            tag="v${version}"
-            cd ../..
-
-            if git rev-parse "${tag}" >/dev/null 2>&1; then
-              echo "Tag ${tag} already exists in source repository" >&2
-              exit 1
-            fi
-
-            git add apps/desktop/package.json
-            git commit -m "chore(desktop): release ${tag}"
-            git tag "${tag}"
-            git push origin "HEAD:${{ inputs.source_ref }}"
-            git push origin "${tag}"
-            build_ref="${tag}"
           fi
+          source_sha="$(git rev-parse HEAD)"
+          cross_repository_release="false"
+          if [ "${RELEASE_REPOSITORY}" != "${SOURCE_REPOSITORY}" ]; then
+            cross_repository_release="true"
+          fi
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+          echo "release_repository=${RELEASE_REPOSITORY}" >> "$GITHUB_OUTPUT"
+          echo "runtime_artifact_mode=${RUNTIME_ARTIFACT_MODE}" >> "$GITHUB_OUTPUT"
+          echo "windows_signature_policy=${WINDOWS_SIGNATURE_POLICY}" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+          echo "cross_repository_release=$cross_repository_release" >> "$GITHUB_OUTPUT"
 
-          echo "version=${version}" >> "${GITHUB_OUTPUT}"
-          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
-          echo "build_ref=${build_ref}" >> "${GITHUB_OUTPUT}"
+  release-preflight:
+    name: release preflight
+    needs: resolve-release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ env.SOURCE_REF }}
+          token: ${{ secrets.SOURCE_REPO_TOKEN || github.token }}
+          fetch-depth: 0
 
-  build:
-    name: Build ${{ matrix.label }}
-    needs: prepare
-    runs-on: ${{ matrix.os }}
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Validate release inputs and secrets
+        env:
+          RELEASE_KIND: full
+          RELEASE_REPOSITORY: ${{ needs.resolve-release.outputs.release_repository }}
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.release_tag }}
+          RUNTIME_ARTIFACT_MODE: ${{ needs.resolve-release.outputs.runtime_artifact_mode }}
+          WINDOWS_SIGNATURE_POLICY: ${{ needs.resolve-release.outputs.windows_signature_policy }}
+          WORKFLOW_REPOSITORY: ${{ github.repository }}
+          GITHUB_REF_TYPE: ${{ github.ref_type }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          RELEASE_REPOSITORY_TOKEN: ${{ secrets.RELEASE_REPOSITORY_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+          APPLE_SIGN_IDENTITY: ${{ secrets.APPLE_SIGN_IDENTITY }}
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD || secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          WINDOWS_CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+          WINDOWS_CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+        shell: bash
+        run: node packages/frontend/scripts/desktop-release-preflight.mjs
+
+  package:
+    name: package ${{ matrix.target.platform }}-${{ matrix.target.arch }}
+    needs:
+      - resolve-release
+      - release-preflight
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - label: windows-x64
-            os: windows-2022
-            forge_platform: win32
-            arch: x64
-            mac_app_dir: ''
-          - label: macos-arm64
-            os: macos-15
-            forge_platform: darwin
+        target:
+          - platform: darwin
             arch: arm64
-            mac_app_dir: mac-arm64
-    env:
-      APPLE_SIGN_IDENTITY: ${{ secrets.APPLE_SIGN_IDENTITY }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-      APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
-      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-      WINDOWS_SIGN_WITH_PARAMS: ${{ secrets.WINDOWS_SIGN_WITH_PARAMS }}
-      OPENTURTLE_WINDOWS_ICON_URL: https://github.com/GuoxinShan/openturtle-desktop-releases/releases/download/${{ needs.prepare.outputs.tag }}/OpenTurtle.OS.ico
-      MAC_ARTIFACT_MODE: ${{ needs.prepare.outputs.mac_artifact_mode }}
-      PROVIDER_RUNTIME_RELEASE_TAG: provider-runtimes
-      RUNTIME_ARTIFACT_MODE: ${{ needs.prepare.outputs.runtime_artifact_mode }}
+            assetPlatform: darwin
+            runner: macos-15
+            make: make:mac:installer
+          - platform: win32
+            arch: x64
+            assetPlatform: win
+            runner: windows-2025
+            make: make:win
+    runs-on: ${{ matrix.target.runner }}
+    timeout-minutes: 90
     steps:
-      - name: Checkout source
+      - name: Check out source
         uses: actions/checkout@v4
         with:
-          repository: aka-danielZhang/openturtle-os
-          ref: ${{ needs.prepare.outputs.build_ref }}
-          token: ${{ secrets.SOURCE_REPO_TOKEN }}
-          fetch-depth: 1
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ env.SOURCE_REF }}
+          token: ${{ secrets.SOURCE_REPO_TOKEN || github.token }}
+          fetch-depth: 0
 
-      - name: Setup Node.js
+      - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
 
-      - name: Set package version from release tag
-        if: github.event_name == 'push'
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd apps/desktop
-          npm version "${{ needs.prepare.outputs.version }}" --no-git-tag-version --allow-same-version
-
-      - name: Setup pnpm with Corepack
+      - name: Install dependencies
         shell: bash
         run: |
           corepack enable
-          corepack prepare pnpm@9.15.0 --activate
-          pnpm --version
-
-      - name: Configure pnpm store
-        shell: bash
-        run: pnpm config set store-dir .pnpm-store
-
-      - name: Restore pnpm store cache
-        id: pnpm-store-cache
-        uses: actions/cache/restore@v4
-        with:
-          path: packages/frontend/.pnpm-store
-          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('packages/frontend/pnpm-lock.yaml') }}
-          restore-keys: |
-            ${{ runner.os }}-pnpm-store-
-
-      - name: Restore Electron download cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/electron
-            ~/Library/Caches/electron
-            ~/AppData/Local/electron/Cache
-          key: ${{ runner.os }}-electron-${{ matrix.arch }}-${{ hashFiles('packages/frontend/pnpm-lock.yaml') }}
-          restore-keys: |
-            ${{ runner.os }}-electron-${{ matrix.arch }}-
-            ${{ runner.os }}-electron-
-
-      - name: Restore Electron Builder cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/electron-builder
-            ~/Library/Caches/electron-builder
-            ~/AppData/Local/electron-builder
-            ~/AppData/Local/electron-builder/Cache
-          key: ${{ runner.os }}-electron-builder-${{ matrix.arch }}-${{ hashFiles('packages/frontend/pnpm-lock.yaml') }}
-          restore-keys: |
-            ${{ runner.os }}-electron-builder-${{ matrix.arch }}-
-            ${{ runner.os }}-electron-builder-
-
-      - name: Restore Windows certificate
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
-        run: |
-          if (-not [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_BASE64)) {
-            $certPath = Join-Path $env:RUNNER_TEMP "windows-signing.pfx"
-            [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64))
-            "WINDOWS_CERTIFICATE_FILE=$certPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          }
-
-      - name: Require macOS signing secrets
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          missing=()
-          for name in \
-            APPLE_SIGN_IDENTITY \
-            APPLE_CERTIFICATE_BASE64 \
-            APPLE_CERTIFICATE_PASSWORD \
-            APPLE_ID \
-            APPLE_ID_PASSWORD \
-            APPLE_TEAM_ID
-          do
-            if [ -z "${!name:-}" ]; then
-              missing+=("${name}")
-            fi
-          done
-
-          if [ "${#missing[@]}" -gt 0 ]; then
-            echo "Missing required macOS signing secret(s): ${missing[*]}" >&2
-            echo "Configure Apple Developer ID signing and notarization secrets before publishing macOS desktop releases." >&2
-            exit 1
-          fi
-
-          if [ "${APPLE_SIGN_IDENTITY}" = "-" ]; then
-            echo "APPLE_SIGN_IDENTITY must be a Developer ID signing identity, not '-'." >&2
-            exit 1
-          fi
+          pnpm --filter @openturtle/desktop... install --frozen-lockfile
 
       - name: Import macOS signing certificate
-        if: runner.os == 'macOS'
+        if: matrix.target.platform == 'darwin'
         shell: bash
+        env:
+          APPLE_SIGN_IDENTITY: ${{ secrets.APPLE_SIGN_IDENTITY }}
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD || secrets.APPLE_ID_PASSWORD }}
         run: |
+          set -euo pipefail
           certificate_path="${RUNNER_TEMP}/macos-signing.p12"
           keychain_path="${RUNNER_TEMP}/app-signing.keychain-db"
           keychain_password="$(uuidgen)"
@@ -373,493 +215,666 @@ jobs:
           security default-keychain -s "${keychain_path}"
           security set-key-partition-list -S apple-tool:,apple: -s -k "${keychain_password}" "${keychain_path}"
           builder_identity="${APPLE_SIGN_IDENTITY#Developer ID Application: }"
-          echo "MACOS_SIGNING_KEYCHAIN=${keychain_path}" >> "${GITHUB_ENV}"
           echo "CSC_KEYCHAIN=${keychain_path}" >> "${GITHUB_ENV}"
           echo "CSC_NAME=${builder_identity}" >> "${GITHUB_ENV}"
-          echo "APPLE_APP_SPECIFIC_PASSWORD=${APPLE_ID_PASSWORD}" >> "${GITHUB_ENV}"
+          echo "APPLE_APP_SPECIFIC_PASSWORD=${APPLE_APP_SPECIFIC_PASSWORD}" >> "${GITHUB_ENV}"
 
       - name: Validate macOS signing identity
-        if: runner.os == 'macOS'
+        if: matrix.target.platform == 'darwin'
         shell: bash
+        env:
+          APPLE_SIGN_IDENTITY: ${{ secrets.APPLE_SIGN_IDENTITY }}
         run: |
           set -euo pipefail
-
-          security find-identity -v -p codesigning "${MACOS_SIGNING_KEYCHAIN}" | tee "${RUNNER_TEMP}/codesigning-identities.txt"
-
+          security find-identity -v -p codesigning "${CSC_KEYCHAIN}" | tee "${RUNNER_TEMP}/codesigning-identities.txt"
           if ! grep -F "${APPLE_SIGN_IDENTITY}" "${RUNNER_TEMP}/codesigning-identities.txt" >/dev/null; then
             echo "APPLE_SIGN_IDENTITY was not found in the imported macOS signing certificate." >&2
             exit 1
           fi
 
-      - name: Install dependencies
-        run: pnpm --filter @openturtle/desktop... install --frozen-lockfile --prefer-offline
-
-      - name: Save pnpm store cache
-        if: ${{ steps.pnpm-store-cache.outputs.cache-hit != 'true' && (matrix.label == 'windows-x64' || matrix.label == 'macos-arm64') }}
-        uses: actions/cache/save@v4
-        with:
-          path: packages/frontend/.pnpm-store
-          key: ${{ steps.pnpm-store-cache.outputs.cache-primary-key }}
-
-      - name: Guard desktop auto-update quit path
-        if: matrix.label == 'windows-x64'
-        run: pnpm test:desktop-update-guard
-
-      - name: Build desktop
-        run: pnpm --filter @openturtle/desktop build
-
-      - name: Package renderer resource update
-        if: matrix.label == 'macos-arm64'
-        shell: bash
-        env:
-          TAG: ${{ needs.prepare.outputs.tag }}
-          VERSION: ${{ needs.prepare.outputs.version }}
-          RELEASE_REPOSITORY: GuoxinShan/openturtle-desktop-releases
-        run: |
-          set -euo pipefail
-
-          update_dir="apps/desktop/out/renderer-update"
-          zip_name="OpenTurtle.OS-renderer-${VERSION}.zip"
-          manifest_path="${update_dir}/renderer-update.json"
-          versioned_manifest_path="${update_dir}/OpenTurtle.OS-renderer-${VERSION}.json"
-          mkdir -p "${update_dir}"
-          rm -f "${update_dir}/${zip_name}" "${manifest_path}" "${versioned_manifest_path}"
-
-          (cd apps/desktop/dist/renderer && zip -qry "../../out/renderer-update/${zip_name}" .)
-          sha256="$(shasum -a 256 "${update_dir}/${zip_name}" | awk '{print $1}')"
-          size="$(wc -c < "${update_dir}/${zip_name}" | tr -d ' ')"
-
-          cat > "${manifest_path}" <<EOF
-          {
-            "version": "${VERSION}",
-            "minShellVersion": "${VERSION}",
-            "url": "https://github.com/${RELEASE_REPOSITORY}/releases/download/${TAG}/${zip_name}",
-            "sha256": "${sha256}",
-            "size": ${size},
-            "createdAt": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-          }
-          EOF
-          cp "${manifest_path}" "${versioned_manifest_path}"
-
-
-      - name: Package provider runtime artifacts
-        if: needs.prepare.outputs.runtime_artifact_mode != 'skip'
-        shell: bash
-        env:
-          RELEASE_REPOSITORY: GuoxinShan/openturtle-desktop-releases
-          RUNTIME_PLATFORM: ${{ matrix.forge_platform }}
-          RUNTIME_ARCH: ${{ matrix.arch }}
-        run: |
-          set -euo pipefail
-          node scripts/package-provider-runtimes.mjs
-
-      - name: Make Windows desktop artifacts
-        if: runner.os == 'Windows'
-        shell: pwsh
+      - name: Build desktop package
         working-directory: packages/frontend/apps/desktop
-        run: |
-          $ErrorActionPreference = 'Stop'
-          pnpm exec electron-builder --win nsis --x64 --publish never --config electron-builder.config.cjs
-          Get-ChildItem -Path out/builder -Recurse | Select-Object -ExpandProperty FullName
-
-      - name: Make macOS desktop artifacts
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          set -euo pipefail
-          mac_targets=(zip)
-          if [ "${MAC_ARTIFACT_MODE}" = "installer" ]; then
-            mac_targets=(dmg zip)
-          fi
-          pnpm --filter @openturtle/desktop exec electron-builder --mac "${mac_targets[@]}" --${{ matrix.arch }} --publish never --config electron-builder.config.cjs
-
-      - name: Verify macOS signature and notarization
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          app_path="apps/desktop/out/builder/${{ matrix.mac_app_dir }}/OpenTurtle OS.app"
-
-          if [ ! -d "${app_path}" ]; then
-            echo "Packaged macOS app not found: ${app_path}" >&2
-            exit 1
-          fi
-
-          codesign --verify --deep --strict --verbose=4 "${app_path}"
-          signature_info="$(codesign -dv --verbose=4 "${app_path}" 2>&1)"
-          printf '%s\n' "${signature_info}"
-
-          if printf '%s\n' "${signature_info}" | grep -q 'Signature=adhoc'; then
-            echo "macOS app was ad-hoc signed instead of Developer ID signed: ${app_path}" >&2
-            exit 1
-          fi
-
-          if ! printf '%s\n' "${signature_info}" | grep -q "TeamIdentifier=${APPLE_TEAM_ID}"; then
-            echo "macOS app TeamIdentifier does not match APPLE_TEAM_ID: ${app_path}" >&2
-            exit 1
-          fi
-
-          xcrun stapler validate "${app_path}"
-          spctl -a -vv -t exec "${app_path}"
-
-      - name: Verify macOS architecture artifacts
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          version="${{ needs.prepare.outputs.version }}"
-          arch="${{ matrix.arch }}"
-          out_dir="apps/desktop/out/builder"
-          expected_artifacts=(
-            "${out_dir}/OpenTurtle.OS-darwin-${arch}-${version}.zip"
-            "${out_dir}/OpenTurtle.OS-darwin-${arch}-${version}.zip.blockmap"
-          )
-          if [ "${MAC_ARTIFACT_MODE}" = "installer" ]; then
-            expected_artifacts+=("${out_dir}/OpenTurtle.OS-darwin-${arch}-${version}.dmg")
-          fi
-
-          for artifact in "${expected_artifacts[@]}"; do
-            if [ ! -f "${artifact}" ]; then
-              echo "Expected macOS architecture artifact not found: ${artifact}" >&2
-              exit 1
-            fi
-          done
-
-          feed_path="${out_dir}/latest-mac.yml"
-          test -f "${feed_path}"
-          grep -F "OpenTurtle.OS-darwin-${arch}-${version}.zip" "${feed_path}"
-          if grep -F "darwin-universal" "${feed_path}"; then
-            echo "latest-mac.yml must not reference universal macOS update artifacts." >&2
-            exit 1
-          fi
-          cp "${feed_path}" "${out_dir}/latest-mac-${arch}.yml"
-
-      - name: Smoke test packaged app (Windows)
-        if: runner.os == 'Windows'
-        working-directory: packages/frontend/apps/desktop
-        run: pnpm smoke:packaged
-
-      - name: Smoke test packaged app (macOS)
-        if: runner.os == 'macOS'
         env:
-          OPENTURTLE_PACKAGED_EXE: apps/desktop/out/builder/${{ matrix.mac_app_dir }}/OpenTurtle OS.app/Contents/MacOS/OpenTurtle OS
-        run: pnpm --filter @openturtle/desktop smoke:packaged
+          RELEASE_REPOSITORY: ${{ needs.resolve-release.outputs.release_repository }}
+          APPLE_SIGN_IDENTITY: ${{ secrets.APPLE_SIGN_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD || secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+        run: pnpm run ${{ matrix.target.make }}
 
-      - name: Upload desktop artifacts
+      - name: Run packaged release gate
+        working-directory: packages/frontend
+        env:
+          RELEASE_REPOSITORY: ${{ needs.resolve-release.outputs.release_repository }}
+          OPENTURTLE_UPDATE_REPO: ${{ needs.resolve-release.outputs.release_repository }}
+          OPENTURTLE_WINDOWS_SIGNATURE_POLICY: ${{ needs.resolve-release.outputs.windows_signature_policy }}
+        run: pnpm run smoke:packaged-release
+
+      - name: Upload packaged release evidence
         uses: actions/upload-artifact@v4
         with:
-          name: desktop-${{ matrix.label }}-${{ needs.prepare.outputs.tag }}
-          path: |
-            packages/frontend/apps/desktop/out/builder/*.dmg
-            packages/frontend/apps/desktop/out/builder/*.zip
-            packages/frontend/apps/desktop/out/builder/*.exe
-            packages/frontend/apps/desktop/out/builder/*.yml
-            packages/frontend/apps/desktop/out/builder/*.blockmap
-            packages/frontend/apps/desktop/out/builder/mac*/*.dmg
-            packages/frontend/apps/desktop/out/builder/mac*/*.zip
-            packages/frontend/apps/desktop/out/renderer-update/*.zip
-            packages/frontend/apps/desktop/out/renderer-update/*.json
-            packages/frontend/apps/desktop/out/provider-runtimes/*
-            apps/desktop/assets/icon.ico
+          name: desktop-release-evidence-${{ matrix.target.platform }}-${{ matrix.target.arch }}
           if-no-files-found: error
+          path: packages/frontend/apps/desktop/out/smoke/*.json
 
-  publish:
-    name: Publish public release assets
-    needs:
-      - prepare
-      - build
-    runs-on: ubuntu-latest
-
-    defaults:
-      run:
-        working-directory: .
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      TAG: ${{ needs.prepare.outputs.tag }}
-      VERSION: ${{ needs.prepare.outputs.version }}
-      RELEASE_REPOSITORY: GuoxinShan/openturtle-desktop-releases
-      RELEASE_DRAFT: ${{ needs.prepare.outputs.draft }}
-      RELEASE_PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
-      MAC_ARTIFACT_MODE: ${{ needs.prepare.outputs.mac_artifact_mode }}
-      PROVIDER_RUNTIME_RELEASE_TAG: provider-runtimes
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: release-assets
-
-      - name: Create or update public release
+      - name: Verify packaged release assets
         shell: bash
         run: |
           set -euo pipefail
-          shopt -s globstar nullglob
-
-          notes_file="release-notes.md"
-          {
-            echo "OpenTurtle OS Desktop ${TAG}"
-            echo
-            echo "Recommended downloads:"
-            echo "- Windows x64: https://github.com/${RELEASE_REPOSITORY}/releases/download/${TAG}/OpenTurtleOSSetup.exe"
-            if [ "${MAC_ARTIFACT_MODE}" = "installer" ]; then
-              echo "- macOS Apple Silicon: https://github.com/${RELEASE_REPOSITORY}/releases/download/${TAG}/OpenTurtle.OS-darwin-arm64-${VERSION}.dmg"
-            else
-              echo "- macOS Apple Silicon update archive: https://github.com/${RELEASE_REPOSITORY}/releases/download/${TAG}/OpenTurtle.OS-darwin-arm64-${VERSION}.zip"
-            fi
-            echo
-            echo "Attached ZIP, NUPKG, blockmap, and RELEASES files are update feed artifacts for the desktop auto-updater."
-          } > "${notes_file}"
-
-          release_args=(
-            "--repo" "${RELEASE_REPOSITORY}"
-            "--title" "OpenTurtle OS ${TAG}"
-            "--notes-file" "${notes_file}"
-            "--target" "main"
-          )
-          if [ "${RELEASE_DRAFT}" = "true" ]; then
-            release_args+=("--draft")
+          shopt -s nullglob
+          files=(packages/frontend/apps/desktop/out/builder/OpenTurtle.OS-${{ matrix.target.assetPlatform }}-${{ matrix.target.arch }}-*)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No packaged release assets matched OpenTurtle.OS-${{ matrix.target.assetPlatform }}-${{ matrix.target.arch }}-*" >&2
+            find packages/frontend/apps/desktop/out/builder -maxdepth 1 -type f -print | sort >&2 || true
+            exit 1
           fi
-          if [ "${RELEASE_PRERELEASE}" = "true" ]; then
-            release_args+=("--prerelease")
+          printf 'Packaged release asset: %s\n' "${files[@]}"
+
+      - name: Upload packaged release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-release-assets-${{ matrix.target.platform }}-${{ matrix.target.arch }}
+          if-no-files-found: error
+          path: |
+            packages/frontend/apps/desktop/out/builder/OpenTurtle.OS-${{ matrix.target.assetPlatform }}-${{ matrix.target.arch }}-*
+            packages/frontend/apps/desktop/out/builder/latest-mac.yml
+            packages/frontend/apps/desktop/out/builder/latest.yml
+            packages/frontend/apps/desktop/out/builder/*.blockmap
+            packages/frontend/apps/desktop/out/builder/*.nupkg
+
+  renderer-assets:
+    name: renderer update assets
+    needs:
+      - resolve-release
+      - release-preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ env.SOURCE_REF }}
+          token: ${{ secrets.SOURCE_REPO_TOKEN || github.token }}
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: |
+          corepack enable
+          pnpm --filter @openturtle/desktop... install --frozen-lockfile
+
+      - name: Resolve renderer version
+        id: renderer
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./packages/frontend/apps/desktop/package.json').version")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build desktop renderer
+        working-directory: packages/frontend
+        run: pnpm --filter @openturtle/desktop build
+
+      - name: Package renderer update assets
+        working-directory: packages/frontend
+        env:
+          RELEASE_REPOSITORY: ${{ needs.resolve-release.outputs.release_repository }}
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.release_tag }}
+          RENDERER_VERSION: ${{ steps.renderer.outputs.version }}
+          MIN_SHELL_VERSION: ${{ steps.renderer.outputs.version }}
+        run: pnpm run package:renderer-update
+
+      - name: Upload renderer release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-release-assets-renderer
+          if-no-files-found: error
+          path: |
+            packages/frontend/apps/desktop/dist/OpenTurtle.OS-renderer-${{ steps.renderer.outputs.version }}.zip
+            packages/frontend/apps/desktop/dist/OpenTurtle.OS-renderer-${{ steps.renderer.outputs.version }}.json
+            packages/frontend/apps/desktop/dist/renderer-update.json
+
+  provider-runtime:
+    name: provider runtime force gate
+    needs:
+      - resolve-release
+      - release-preflight
+    if: needs.resolve-release.outputs.runtime_artifact_mode == 'force'
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ env.SOURCE_REF }}
+          token: ${{ secrets.SOURCE_REPO_TOKEN || github.token }}
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: |
+          corepack enable
+          pnpm --filter @openturtle/desktop... install --frozen-lockfile
+
+      - name: Prepare OpenCode provider runtime assets
+        working-directory: packages/frontend
+        env:
+          RELEASE_REPOSITORY: ${{ needs.resolve-release.outputs.release_repository }}
+          RUNTIME_ARTIFACT_MODE: force
+        run: pnpm run prepare:provider-runtime-opencode-release
+
+      - name: Verify OpenCode provider runtime assets before upload
+        id: verify-provider-runtime-assets
+        working-directory: packages/frontend
+        run: pnpm run verify:provider-runtime-opencode-release-assets
+
+      - name: Upload OpenCode provider runtime assets
+        working-directory: packages/frontend
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_REPOSITORY_TOKEN || github.token }}
+          RELEASE_REPOSITORY: ${{ needs.resolve-release.outputs.release_repository }}
+        run: |
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "RELEASE_REPOSITORY_TOKEN is required to upload provider runtime assets" >&2
+            exit 1
           fi
-
-          if gh release view "${TAG}" --repo "${RELEASE_REPOSITORY}" >/dev/null 2>&1; then
-            gh release edit "${TAG}" \
-              --repo "${RELEASE_REPOSITORY}" \
-              --title "OpenTurtle OS ${TAG}" \
-              --notes-file "${notes_file}"
-          else
-            gh release create "${TAG}" "${release_args[@]}"
+          if ! gh release view provider-runtimes --repo "$RELEASE_REPOSITORY" >/dev/null 2>&1; then
+            gh release create provider-runtimes \
+              --repo "$RELEASE_REPOSITORY" \
+              --title "Provider runtimes" \
+              --notes "OpenTurtle OS provider runtime assets" \
+              --latest=false
           fi
+          gh release edit provider-runtimes \
+            --repo "$RELEASE_REPOSITORY" \
+            --latest=false
+          gh release upload provider-runtimes \
+            "${{ steps.verify-provider-runtime-assets.outputs.manifest_path }}" \
+            "${{ steps.verify-provider-runtime-assets.outputs.tar_path }}" \
+            --repo "$RELEASE_REPOSITORY" \
+            --clobber
 
-          rm -rf release-upload
-          mkdir -p release-upload
-          for asset in release-assets/**/*; do
-            if [ ! -f "${asset}" ]; then
-              continue
-            fi
+      - name: Verify provider runtimes public release
+        working-directory: packages/frontend
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_REPOSITORY_TOKEN || github.token }}
+          RELEASE_REPOSITORY: ${{ needs.resolve-release.outputs.release_repository }}
+        run: pnpm run verify:provider-runtime-public-release -- apps/desktop/out/smoke/provider-runtime-opencode-release-assets-darwin-arm64.json
 
-            base="$(basename "${asset}")"
-            normalized="${base// /.}"
-            case "${asset}" in
-              *renderer-update/*)
-                normalized="${base}"
-                ;;
-              */latest-mac.yml|*/latest-mac-*.yml)
-                continue
-                ;;
-              *provider-runtimes/*)
-                continue
-                ;;
-              *provider-runtime-manifest-*.json)
-                continue
-                ;;
-              *OpenTurtleOSSetup.exe)
-                normalized="OpenTurtleOSSetup.exe"
-                ;;
-              */assets/icon.ico)
-                normalized="OpenTurtle.OS.ico"
-                ;;
-              */RELEASES)
-                normalized="RELEASES"
-                ;;
-            esac
+      - name: Upload provider runtimes public release evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-release-evidence-provider-runtime-public-darwin-arm64
+          if-no-files-found: error
+          path: packages/frontend/out/provider-runtime-public-release/provider-runtime-public-release-darwin-arm64.json
 
-            cp "${asset}" "release-upload/${normalized}"
-            if [[ "${normalized}" == OpenTurtle.OS-win-x64-"${VERSION}".exe ]]; then
-              cp "${asset}" "release-upload/OpenTurtleOSSetup.exe"
-            fi
-          done
+      - name: Run strict remote provider runtime gate
+        working-directory: packages/frontend
+        env:
+          RELEASE_REPOSITORY: ${{ needs.resolve-release.outputs.release_repository }}
+        run: pnpm run smoke:provider-runtime-release-gate:remote
 
-          runtime_upload_dir="runtime-channel-upload"
-          runtime_existing_dir="runtime-channel-existing"
-          rm -rf "${runtime_upload_dir}" "${runtime_existing_dir}"
-          mkdir -p "${runtime_upload_dir}" "${runtime_existing_dir}"
+      - name: Upload provider runtime evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-release-evidence-provider-runtime-darwin-arm64
+          if-no-files-found: error
+          path: |
+            packages/frontend/apps/desktop/out/smoke/provider-runtime-release-gate-remote-darwin-arm64.json
+            packages/frontend/apps/desktop/out/smoke/provider-runtime-opencode-release-assets-darwin-arm64.json
 
-          if gh release download "${PROVIDER_RUNTIME_RELEASE_TAG}" \
-            --repo "${RELEASE_REPOSITORY}" \
-            -p provider-runtime-manifest.json \
-            -D "${runtime_existing_dir}" >/dev/null 2>&1; then
-            existing_runtime_manifest="${runtime_existing_dir}/provider-runtime-manifest.json"
-          else
-            existing_runtime_manifest=""
+      - name: Upload provider runtime assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-release-provider-runtime-assets-darwin-arm64
+          if-no-files-found: error
+          path: |
+            ${{ steps.verify-provider-runtime-assets.outputs.manifest_path }}
+            ${{ steps.verify-provider-runtime-assets.outputs.tar_path }}
+
+  audit-packaged-release-evidence:
+    needs:
+      - resolve-release
+      - package
+      - renderer-assets
+    if: needs.resolve-release.outputs.runtime_artifact_mode != 'force'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ env.SOURCE_REF }}
+          token: ${{ secrets.SOURCE_REPO_TOKEN || github.token }}
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: |
+          corepack enable
+          pnpm --filter @openturtle/desktop... install --frozen-lockfile
+
+      - name: Download evidence artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: desktop-release-evidence-*
+          path: out/desktop-release-evidence
+          merge-multiple: true
+
+      - name: Audit downloaded evidence bundle
+        working-directory: packages/frontend
+        env:
+          OPENTURTLE_RELEASE_EVIDENCE_DIR: ${{ github.workspace }}/out/desktop-release-evidence
+          OPENTURTLE_RELEASE_EVIDENCE_BUNDLE_TARGETS: darwin:arm64:packaged,win32:x64:packaged
+          OPENTURTLE_RELEASE_REPOSITORY: ${{ needs.resolve-release.outputs.release_repository }}
+          OPENTURTLE_RELEASE_TAG: ${{ needs.resolve-release.outputs.release_tag }}
+          OPENTURTLE_RELEASE_SOURCE_REPOSITORY: ${{ env.SOURCE_REPOSITORY }}
+          OPENTURTLE_RELEASE_SOURCE_SHA: ${{ needs.resolve-release.outputs.source_sha }}
+          OPENTURTLE_RELEASE_WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          OPENTURTLE_RUNTIME_ARTIFACT_MODE: ${{ needs.resolve-release.outputs.runtime_artifact_mode }}
+        run: pnpm run verify:release-evidence:bundle
+
+      - name: Upload release evidence bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-release-evidence-bundle
+          if-no-files-found: error
+          path: out/desktop-release-evidence/release-evidence-bundle-*.json
+
+  audit-release-evidence-with-provider-runtime:
+    needs:
+      - resolve-release
+      - package
+      - renderer-assets
+      - provider-runtime
+    if: needs.resolve-release.outputs.runtime_artifact_mode == 'force'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ env.SOURCE_REF }}
+          token: ${{ secrets.SOURCE_REPO_TOKEN || github.token }}
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: |
+          corepack enable
+          pnpm --filter @openturtle/desktop... install --frozen-lockfile
+
+      - name: Download evidence artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: desktop-release-evidence-*
+          path: out/desktop-release-evidence
+          merge-multiple: true
+
+      - name: Download provider runtime assets for evidence audit
+        uses: actions/download-artifact@v4
+        with:
+          pattern: desktop-release-provider-runtime-assets-*
+          path: out/desktop-release-evidence
+          merge-multiple: true
+
+      - name: Audit downloaded evidence bundle
+        working-directory: packages/frontend
+        env:
+          OPENTURTLE_RELEASE_EVIDENCE_DIR: ${{ github.workspace }}/out/desktop-release-evidence
+          OPENTURTLE_RELEASE_EVIDENCE_BUNDLE_TARGETS: darwin:arm64:packaged,win32:x64:packaged,darwin:arm64:provider-runtime
+          OPENTURTLE_RELEASE_REPOSITORY: ${{ needs.resolve-release.outputs.release_repository }}
+          OPENTURTLE_RELEASE_TAG: ${{ needs.resolve-release.outputs.release_tag }}
+          OPENTURTLE_RELEASE_SOURCE_REPOSITORY: ${{ env.SOURCE_REPOSITORY }}
+          OPENTURTLE_RELEASE_SOURCE_SHA: ${{ needs.resolve-release.outputs.source_sha }}
+          OPENTURTLE_RELEASE_WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          OPENTURTLE_RUNTIME_ARTIFACT_MODE: ${{ needs.resolve-release.outputs.runtime_artifact_mode }}
+        run: pnpm run verify:release-evidence:bundle
+
+      - name: Upload release evidence bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-release-evidence-bundle
+          if-no-files-found: error
+          path: out/desktop-release-evidence/release-evidence-bundle-*.json
+
+  publish-release:
+    needs:
+      - resolve-release
+      - package
+      - renderer-assets
+      - audit-packaged-release-evidence
+    if: needs.resolve-release.outputs.runtime_artifact_mode != 'force'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ env.SOURCE_REF }}
+          token: ${{ secrets.SOURCE_REPO_TOKEN || github.token }}
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Download packaged and renderer assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: desktop-release-assets-*
+          path: out/desktop-release-assets
+          merge-multiple: true
+
+      - name: Download release evidence bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: desktop-release-evidence-bundle
+          path: out/desktop-release-evidence-bundle
+
+      - name: Audit release asset set
+        run: node packages/frontend/scripts/verify-desktop-release-assets.mjs out/desktop-release-assets out/desktop-release-assets-upload.txt
+
+      - name: Ensure public release exists
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_REPOSITORY_TOKEN || github.token }}
+          RELEASE_REPOSITORY: ${{ needs.resolve-release.outputs.release_repository }}
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.release_tag }}
+          RELEASE_TARGET_SHA: ${{ needs.resolve-release.outputs.source_sha }}
+          RELEASE_SOURCE_REPOSITORY: ${{ env.SOURCE_REPOSITORY }}
+          RELEASE_CROSS_REPOSITORY: ${{ needs.resolve-release.outputs.cross_repository_release }}
+          RELEASE_WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "RELEASE_REPOSITORY_TOKEN is required to create the desktop release" >&2
+            exit 1
           fi
-
-          node <<'NODE'
-          const fs = require('node:fs')
-          const path = require('node:path')
-
-          const root = 'release-assets'
-          const out = 'release-upload/latest-mac.yml'
-          const version = process.env.VERSION
-
-          function walk(dir) {
-            const entries = []
-            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-              const fullPath = path.join(dir, entry.name)
-              if (entry.isDirectory()) entries.push(...walk(fullPath))
-              else if (entry.isFile()) entries.push(fullPath)
-            }
-            return entries
-          }
-
-          function findFeed(arch) {
-            const name = `latest-mac-${arch}.yml`
-            const match = walk(root).find((file) => path.basename(file) === name)
-            if (!match) throw new Error(`Missing ${name}`)
-            return match
-          }
-
-          function parseFeed(file) {
-            const text = fs.readFileSync(file, 'utf8')
-            const entries = []
-            const regex = /-\s+url:\s+([^\n]+)\n\s+sha512:\s+([^\n]+)\n\s+size:\s+([0-9]+)/g
-            let match
-            while ((match = regex.exec(text)) !== null) {
-              entries.push({
-                url: match[1].trim(),
-                sha512: match[2].trim(),
-                size: Number(match[3]),
-              })
-            }
-            return entries
-          }
-
-          const byUrl = new Map()
-          for (const entry of parseFeed(findFeed('arm64'))) {
-            byUrl.set(entry.url, entry)
-          }
-
-          const orderedUrls = [
-            `OpenTurtle.OS-darwin-arm64-${version}.zip`,
-          ]
-          if (process.env.MAC_ARTIFACT_MODE === 'installer') {
-            orderedUrls.push(
-              `OpenTurtle.OS-darwin-arm64-${version}.dmg`,
+          source_marker="Source: ${RELEASE_SOURCE_REPOSITORY}@${RELEASE_TARGET_SHA}"
+          run_marker="Run: ${RELEASE_WORKFLOW_RUN_URL}"
+          if ! gh release view "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" >/dev/null 2>&1; then
+            release_notes="OpenTurtle OS desktop release $RELEASE_TAG"$'\n'"${source_marker}"$'\n'"${run_marker}"
+            create_args=(
+              "$RELEASE_TAG"
+              --repo "$RELEASE_REPOSITORY"
+              --title "$RELEASE_TAG"
+              --notes "$release_notes"
             )
-          }
-          const entries = orderedUrls.map((url) => byUrl.get(url))
-          const missing = orderedUrls.filter((url, index) => !entries[index])
-          if (missing.length > 0) {
-            throw new Error(`Missing mac update entries: ${missing.join(', ')}`)
-          }
-
-          const primary = entries[0]
-          const lines = [
-            `version: ${version}`,
-            'files:',
-            ...entries.flatMap((entry) => [
-              `  - url: ${entry.url}`,
-              `    sha512: ${entry.sha512}`,
-              `    size: ${entry.size}`,
-            ]),
-            `path: ${primary.url}`,
-            `sha512: ${primary.sha512}`,
-            `releaseDate: '${new Date().toISOString()}'`,
-          ]
-          fs.writeFileSync(out, `${lines.join('\n')}\n`)
-          NODE
-
-
-          EXISTING_RUNTIME_MANIFEST="${existing_runtime_manifest}" \
-          RUNTIME_UPLOAD_DIR="${runtime_upload_dir}" \
-          node <<'NODE'
-          const fs = require('node:fs')
-          const path = require('node:path')
-
-          function walk(dir) {
-            const entries = []
-            if (!fs.existsSync(dir)) return entries
-            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-              const fullPath = path.join(dir, entry.name)
-              if (entry.isDirectory()) entries.push(...walk(fullPath))
-              else if (entry.isFile()) entries.push(fullPath)
-            }
-            return entries
-          }
-
-          function runtimeKey(entry) {
-            return [
-              entry.provider,
-              entry.runtime,
-              entry.platform,
-              entry.arch,
-            ].join('|')
-          }
-
-          const byKey = new Map()
-          const existingManifestPath = process.env.EXISTING_RUNTIME_MANIFEST
-          if (existingManifestPath && fs.existsSync(existingManifestPath)) {
-            const existing = JSON.parse(fs.readFileSync(existingManifestPath, 'utf8'))
-            if (Array.isArray(existing.runtimes)) {
-              for (const entry of existing.runtimes) byKey.set(runtimeKey(entry), entry)
-            }
-          }
-
-          const newEntries = []
-          for (const file of walk('release-assets')) {
-            if (!/^provider-runtime-manifest-.+\.json$/.test(path.basename(file))) continue
-            const manifest = JSON.parse(fs.readFileSync(file, 'utf8'))
-            if (Array.isArray(manifest.runtimes)) newEntries.push(...manifest.runtimes)
-          }
-
-          const uploadDir = process.env.RUNTIME_UPLOAD_DIR
-          if (newEntries.length > 0) {
-            for (const entry of newEntries) byKey.set(runtimeKey(entry), entry)
-            const runtimes = [...byKey.values()].sort((left, right) => (
-              runtimeKey(left).localeCompare(runtimeKey(right))
-            ))
-            fs.mkdirSync(uploadDir, { recursive: true })
-            fs.writeFileSync(
-              path.join(uploadDir, 'provider-runtime-manifest.json'),
-              JSON.stringify(
-                {
-                  version: process.env.VERSION,
-                  createdAt: new Date().toISOString(),
-                  runtimes,
-                },
-                null,
-                2,
-              ) + '\n',
-            )
-
-            for (const file of walk('release-assets')) {
-              if (!/^OpenTurtle\.OS-runtime-.+\.tar\.gz$/.test(path.basename(file))) continue
-              fs.copyFileSync(file, path.join(uploadDir, path.basename(file)))
-            }
-          }
-          NODE
-
-          if compgen -G "${runtime_upload_dir}/*" > /dev/null; then
-            runtime_notes_file="runtime-release-notes.md"
-            {
-              echo "OpenTurtle provider runtime channel"
-              echo
-              echo "This release stores reusable Claude/Codex/Qoder/Kiro ACP runtime artifacts."
-              echo "Desktop app releases read provider-runtime-manifest.json from this channel."
-            } > "${runtime_notes_file}"
-
-            if gh release view "${PROVIDER_RUNTIME_RELEASE_TAG}" --repo "${RELEASE_REPOSITORY}" >/dev/null 2>&1; then
-              gh release edit "${PROVIDER_RUNTIME_RELEASE_TAG}" \
-                --repo "${RELEASE_REPOSITORY}" \
-                --title "OpenTurtle Provider Runtimes" \
-                --notes-file "${runtime_notes_file}" \
-                --prerelease
-            else
-              gh release create "${PROVIDER_RUNTIME_RELEASE_TAG}" \
-                --repo "${RELEASE_REPOSITORY}" \
-                --title "OpenTurtle Provider Runtimes" \
-                --notes-file "${runtime_notes_file}" \
-                --target "main" \
-                --prerelease
+            if [ "$RELEASE_CROSS_REPOSITORY" != "true" ]; then
+              create_args+=(--target "$RELEASE_TARGET_SHA")
             fi
-
-            ls -lh "${runtime_upload_dir}"
-            gh release upload "${PROVIDER_RUNTIME_RELEASE_TAG}" "${runtime_upload_dir}"/* --repo "${RELEASE_REPOSITORY}" --clobber
+            gh release create "${create_args[@]}"
           else
-            echo "No provider runtime changes; keeping ${PROVIDER_RUNTIME_RELEASE_TAG} unchanged."
+            release_body="$(gh release view "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" --json body -q .body)"
+            if [[ "$release_body" != *"$source_marker"* ]]; then
+              echo "Release $RELEASE_TAG in $RELEASE_REPOSITORY does not match source marker: $source_marker" >&2
+              exit 1
+            fi
+            if [[ "$release_body" != *"$run_marker"* ]]; then
+              echo "Release $RELEASE_TAG in $RELEASE_REPOSITORY does not match workflow run marker: $run_marker" >&2
+              exit 1
+            fi
           fi
 
-          ls -lh release-upload
-          gh release upload "${TAG}" release-upload/* --repo "${RELEASE_REPOSITORY}" --clobber
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_REPOSITORY_TOKEN || github.token }}
+          RELEASE_REPOSITORY: ${{ needs.resolve-release.outputs.release_repository }}
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "RELEASE_REPOSITORY_TOKEN is required to upload desktop release assets" >&2
+            exit 1
+          fi
+          mapfile -t files < out/desktop-release-assets-upload.txt
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No release assets were downloaded" >&2
+            exit 1
+          fi
+          mapfile -t evidence_files < <(find out/desktop-release-evidence-bundle -type f -name 'release-evidence-bundle-*.json' | sort)
+          if [ "${#evidence_files[@]}" -ne 1 ]; then
+            echo "Expected exactly one release evidence bundle, found ${#evidence_files[@]}" >&2
+            printf '%s\n' "${evidence_files[@]}" >&2
+            exit 1
+          fi
+          files+=("${evidence_files[@]}")
+          gh release upload "$RELEASE_TAG" "${files[@]}" \
+            --repo "$RELEASE_REPOSITORY" \
+            --clobber
+
+      - name: Verify public release assets
+        working-directory: packages/frontend
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_REPOSITORY_TOKEN || github.token }}
+          RELEASE_REPOSITORY: ${{ needs.resolve-release.outputs.release_repository }}
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.release_tag }}
+          RELEASE_TARGET_SHA: ${{ needs.resolve-release.outputs.source_sha }}
+          RELEASE_SOURCE_REPOSITORY: ${{ env.SOURCE_REPOSITORY }}
+          RELEASE_WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUNTIME_ARTIFACT_MODE: ${{ needs.resolve-release.outputs.runtime_artifact_mode }}
+        run: pnpm run verify:desktop-public-release -- ../../out/desktop-release-assets-upload.txt ../../out/desktop-release-evidence-bundle
+
+      - name: Upload public release verification evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-public-release-evidence
+          if-no-files-found: error
+          path: packages/frontend/out/desktop-public-release/desktop-public-release-*.json
+
+  audit-release-workflow-result:
+    needs:
+      - resolve-release
+      - release-preflight
+      - package
+      - renderer-assets
+      - provider-runtime
+      - audit-packaged-release-evidence
+      - audit-release-evidence-with-provider-runtime
+      - publish-release
+      - publish-release-with-provider-runtime
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ env.SOURCE_REF }}
+          token: ${{ secrets.SOURCE_REPO_TOKEN || github.token }}
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Audit release workflow result
+        working-directory: packages/frontend
+        env:
+          RELEASE_REPOSITORY: ${{ needs.resolve-release.outputs.release_repository }}
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.release_tag }}
+          RELEASE_TARGET_SHA: ${{ needs.resolve-release.outputs.source_sha }}
+          RELEASE_SOURCE_REPOSITORY: ${{ env.SOURCE_REPOSITORY }}
+          RELEASE_WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUNTIME_ARTIFACT_MODE: ${{ needs.resolve-release.outputs.runtime_artifact_mode }}
+          JOB_RESULT_RESOLVE_RELEASE: ${{ needs.resolve-release.result }}
+          JOB_RESULT_RELEASE_PREFLIGHT: ${{ needs.release-preflight.result }}
+          JOB_RESULT_PACKAGE: ${{ needs.package.result }}
+          JOB_RESULT_RENDERER_ASSETS: ${{ needs.renderer-assets.result }}
+          JOB_RESULT_PROVIDER_RUNTIME: ${{ needs.provider-runtime.result }}
+          JOB_RESULT_AUDIT_PACKAGED_RELEASE_EVIDENCE: ${{ needs.audit-packaged-release-evidence.result }}
+          JOB_RESULT_AUDIT_RELEASE_EVIDENCE_WITH_PROVIDER_RUNTIME: ${{ needs.audit-release-evidence-with-provider-runtime.result }}
+          JOB_RESULT_PUBLISH_RELEASE: ${{ needs.publish-release.result }}
+          JOB_RESULT_PUBLISH_RELEASE_WITH_PROVIDER_RUNTIME: ${{ needs.publish-release-with-provider-runtime.result }}
+        run: pnpm run verify:desktop-release-workflow-result
+
+      - name: Upload release workflow result evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-release-workflow-result
+          if-no-files-found: warn
+          path: packages/frontend/out/desktop-release-workflow/desktop-release-workflow-*.json
+
+  publish-release-with-provider-runtime:
+    needs:
+      - resolve-release
+      - package
+      - renderer-assets
+      - provider-runtime
+      - audit-release-evidence-with-provider-runtime
+    if: needs.resolve-release.outputs.runtime_artifact_mode == 'force'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ env.SOURCE_REF }}
+          token: ${{ secrets.SOURCE_REPO_TOKEN || github.token }}
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Download packaged and renderer assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: desktop-release-assets-*
+          path: out/desktop-release-assets
+          merge-multiple: true
+
+      - name: Download release evidence bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: desktop-release-evidence-bundle
+          path: out/desktop-release-evidence-bundle
+
+      - name: Audit release asset set
+        run: node packages/frontend/scripts/verify-desktop-release-assets.mjs out/desktop-release-assets out/desktop-release-assets-upload.txt
+
+      - name: Ensure public release exists
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_REPOSITORY_TOKEN || github.token }}
+          RELEASE_REPOSITORY: ${{ needs.resolve-release.outputs.release_repository }}
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.release_tag }}
+          RELEASE_TARGET_SHA: ${{ needs.resolve-release.outputs.source_sha }}
+          RELEASE_SOURCE_REPOSITORY: ${{ env.SOURCE_REPOSITORY }}
+          RELEASE_CROSS_REPOSITORY: ${{ needs.resolve-release.outputs.cross_repository_release }}
+          RELEASE_WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "RELEASE_REPOSITORY_TOKEN is required to create the desktop release" >&2
+            exit 1
+          fi
+          source_marker="Source: ${RELEASE_SOURCE_REPOSITORY}@${RELEASE_TARGET_SHA}"
+          run_marker="Run: ${RELEASE_WORKFLOW_RUN_URL}"
+          if ! gh release view "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" >/dev/null 2>&1; then
+            release_notes="OpenTurtle OS desktop release $RELEASE_TAG"$'\n'"${source_marker}"$'\n'"${run_marker}"
+            create_args=(
+              "$RELEASE_TAG"
+              --repo "$RELEASE_REPOSITORY"
+              --title "$RELEASE_TAG"
+              --notes "$release_notes"
+            )
+            if [ "$RELEASE_CROSS_REPOSITORY" != "true" ]; then
+              create_args+=(--target "$RELEASE_TARGET_SHA")
+            fi
+            gh release create "${create_args[@]}"
+          else
+            release_body="$(gh release view "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" --json body -q .body)"
+            if [[ "$release_body" != *"$source_marker"* ]]; then
+              echo "Release $RELEASE_TAG in $RELEASE_REPOSITORY does not match source marker: $source_marker" >&2
+              exit 1
+            fi
+            if [[ "$release_body" != *"$run_marker"* ]]; then
+              echo "Release $RELEASE_TAG in $RELEASE_REPOSITORY does not match workflow run marker: $run_marker" >&2
+              exit 1
+            fi
+          fi
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_REPOSITORY_TOKEN || github.token }}
+          RELEASE_REPOSITORY: ${{ needs.resolve-release.outputs.release_repository }}
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "RELEASE_REPOSITORY_TOKEN is required to upload desktop release assets" >&2
+            exit 1
+          fi
+          mapfile -t files < out/desktop-release-assets-upload.txt
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No release assets were downloaded" >&2
+            exit 1
+          fi
+          mapfile -t evidence_files < <(find out/desktop-release-evidence-bundle -type f -name 'release-evidence-bundle-*.json' | sort)
+          if [ "${#evidence_files[@]}" -ne 1 ]; then
+            echo "Expected exactly one release evidence bundle, found ${#evidence_files[@]}" >&2
+            printf '%s\n' "${evidence_files[@]}" >&2
+            exit 1
+          fi
+          files+=("${evidence_files[@]}")
+          gh release upload "$RELEASE_TAG" "${files[@]}" \
+            --repo "$RELEASE_REPOSITORY" \
+            --clobber
+
+      - name: Verify public release assets
+        working-directory: packages/frontend
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_REPOSITORY_TOKEN || github.token }}
+          RELEASE_REPOSITORY: ${{ needs.resolve-release.outputs.release_repository }}
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.release_tag }}
+          RELEASE_TARGET_SHA: ${{ needs.resolve-release.outputs.source_sha }}
+          RELEASE_SOURCE_REPOSITORY: ${{ env.SOURCE_REPOSITORY }}
+          RELEASE_WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUNTIME_ARTIFACT_MODE: ${{ needs.resolve-release.outputs.runtime_artifact_mode }}
+        run: pnpm run verify:desktop-public-release -- ../../out/desktop-release-assets-upload.txt ../../out/desktop-release-evidence-bundle
+
+      - name: Upload public release verification evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-public-release-evidence
+          if-no-files-found: error
+          path: packages/frontend/out/desktop-public-release/desktop-public-release-*.json
