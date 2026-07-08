@@ -452,6 +452,7 @@ jobs:
           name: desktop-release-provider-runtime-assets-darwin-arm64
           if-no-files-found: error
           path: |
+            packages/frontend/apps/desktop/out/provider-runtimes/provider-runtime-manifest-darwin-arm64.json
             ${{ steps.verify-provider-runtime-assets.outputs.manifest_path }}
             ${{ steps.verify-provider-runtime-assets.outputs.tar_path }}
 
@@ -594,6 +595,9 @@ jobs:
         with:
           node-version: 24
 
+      - name: Enable Corepack
+        run: corepack enable
+
       - name: Download packaged and renderer assets
         uses: actions/download-artifact@v4
         with:
@@ -726,6 +730,9 @@ jobs:
         with:
           node-version: 24
 
+      - name: Enable Corepack
+        run: corepack enable
+
       - name: Audit release workflow result
         working-directory: packages/frontend
         env:
@@ -777,6 +784,9 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 24
+
+      - name: Enable Corepack
+        run: corepack enable
 
       - name: Download packaged and renderer assets
         uses: actions/download-artifact@v4
