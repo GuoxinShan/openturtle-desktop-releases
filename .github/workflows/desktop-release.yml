@@ -525,6 +525,7 @@ jobs:
       - package
       - renderer-assets
       - audit-release-evidence
+    if: ${{ always() && needs.resolve-release.result == 'success' && needs.package.result == 'success' && needs.renderer-assets.result == 'success' && needs.audit-release-evidence.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
