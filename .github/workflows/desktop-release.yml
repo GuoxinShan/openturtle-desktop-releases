@@ -67,7 +67,7 @@ jobs:
       cross_repository_release: ${{ steps.release.outputs.cross_repository_release }}
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ env.SOURCE_REPOSITORY }}
           ref: ${{ env.SOURCE_REF }}
@@ -75,7 +75,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 24
 
@@ -114,7 +114,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ env.SOURCE_REPOSITORY }}
           ref: ${{ env.SOURCE_REF }}
@@ -122,7 +122,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 24
 
@@ -172,7 +172,7 @@ jobs:
     timeout-minutes: 90
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ env.SOURCE_REPOSITORY }}
           ref: ${{ env.SOURCE_REF }}
@@ -180,7 +180,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 24
 
@@ -264,7 +264,7 @@ jobs:
         run: pnpm run smoke:packaged-release
 
       - name: Upload packaged release evidence
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: desktop-release-evidence-${{ matrix.target.platform }}-${{ matrix.target.arch }}
           if-no-files-found: error
@@ -284,7 +284,7 @@ jobs:
           printf 'Packaged release asset: %s\n' "${files[@]}"
 
       - name: Upload packaged release assets
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: desktop-release-assets-${{ matrix.target.platform }}-${{ matrix.target.arch }}
           if-no-files-found: error
@@ -304,7 +304,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ env.SOURCE_REPOSITORY }}
           ref: ${{ env.SOURCE_REF }}
@@ -312,7 +312,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 24
 
@@ -343,7 +343,7 @@ jobs:
         run: pnpm run package:renderer-update
 
       - name: Upload renderer release assets
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: desktop-release-assets-renderer
           if-no-files-found: error
@@ -362,7 +362,7 @@ jobs:
     timeout-minutes: 90
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ env.SOURCE_REPOSITORY }}
           ref: ${{ env.SOURCE_REF }}
@@ -370,7 +370,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 24
 
@@ -425,7 +425,7 @@ jobs:
         run: pnpm run verify:provider-runtime-public-release -- apps/desktop/out/smoke/provider-runtime-opencode-release-assets-darwin-arm64.json
 
       - name: Upload provider runtimes public release evidence
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: desktop-release-evidence-provider-runtime-public-darwin-arm64
           if-no-files-found: error
@@ -438,7 +438,7 @@ jobs:
         run: pnpm run smoke:provider-runtime-release-gate:remote
 
       - name: Upload provider runtime evidence
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: desktop-release-evidence-provider-runtime-darwin-arm64
           if-no-files-found: error
@@ -447,7 +447,7 @@ jobs:
             packages/frontend/apps/desktop/out/smoke/provider-runtime-opencode-release-assets-darwin-arm64.json
 
       - name: Upload provider runtime assets
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: desktop-release-provider-runtime-assets-darwin-arm64
           if-no-files-found: error
@@ -467,7 +467,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ env.SOURCE_REPOSITORY }}
           ref: ${{ env.SOURCE_REF }}
@@ -475,7 +475,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 24
 
@@ -485,7 +485,7 @@ jobs:
           pnpm --filter @openturtle/desktop... install --frozen-lockfile
 
       - name: Download evidence artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: desktop-release-evidence-*
           path: out/desktop-release-evidence
@@ -493,7 +493,7 @@ jobs:
 
       - name: Download provider runtime assets for evidence audit
         if: needs.resolve-release.outputs.runtime_artifact_mode == 'force'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: desktop-release-provider-runtime-assets-*
           path: out/desktop-release-evidence
@@ -513,7 +513,7 @@ jobs:
         run: pnpm run verify:release-evidence:bundle
 
       - name: Upload release evidence bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: desktop-release-evidence-bundle
           if-no-files-found: error
@@ -530,7 +530,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ env.SOURCE_REPOSITORY }}
           ref: ${{ env.SOURCE_REF }}
@@ -538,7 +538,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 24
 
@@ -546,14 +546,14 @@ jobs:
         run: corepack enable
 
       - name: Download packaged and renderer assets
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: desktop-release-assets-*
           path: out/desktop-release-assets
           merge-multiple: true
 
       - name: Download release evidence bundle
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: desktop-release-evidence-bundle
           path: out/desktop-release-evidence-bundle
@@ -654,7 +654,7 @@ jobs:
         run: pnpm run verify:desktop-public-release -- ../../out/desktop-release-assets-upload.txt ../../out/desktop-release-evidence-bundle
 
       - name: Upload public release verification evidence
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: desktop-public-release-evidence
           if-no-files-found: error
@@ -674,7 +674,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ env.SOURCE_REPOSITORY }}
           ref: ${{ env.SOURCE_REF }}
@@ -682,7 +682,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 24
 
@@ -709,7 +709,7 @@ jobs:
 
       - name: Upload release workflow result evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: desktop-release-workflow-result
           if-no-files-found: warn
