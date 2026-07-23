@@ -331,7 +331,7 @@ jobs:
           RENDERER_VERSION: ${{ needs.renderer-release.outputs.renderer_version }}
           JOB_RESULT_RENDERER_RELEASE_PREFLIGHT: ${{ needs.renderer-release-preflight.result }}
           JOB_RESULT_RENDERER_RELEASE: ${{ needs.renderer-release.result }}
-        run: pnpm run verify:desktop-renderer-release-workflow-result
+        run: node scripts/verify-desktop-renderer-release-workflow-result.mjs
 
       - name: Upload renderer release workflow result evidence
         if: always()
