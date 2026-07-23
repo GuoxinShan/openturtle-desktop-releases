@@ -9,7 +9,7 @@ on:
       source_ref:
         description: Source ref to build from
         required: false
-        default: main
+        default: master
       source_repository:
         description: Source repository to check out
         required: true
@@ -49,7 +49,7 @@ concurrency:
 
 env:
   SOURCE_REPOSITORY: ${{ inputs.source_repository || 'aka-danielZhang/openturtle-os' }}
-  SOURCE_REF: ${{ inputs.source_ref || (github.event_name == 'push' && 'main') || github.ref }}
+  SOURCE_REF: ${{ inputs.source_ref || (github.event_name == 'push' && 'master') || github.ref }}
   RELEASE_REPOSITORY: ${{ inputs.release_repository || 'GuoxinShan/openturtle-desktop-releases' }}
   RUNTIME_ARTIFACT_MODE: ${{ inputs.runtime_artifact_mode || 'auto' }}
   WINDOWS_SIGNATURE_POLICY: ${{ inputs.windows_signature_policy || 'skip' }}
